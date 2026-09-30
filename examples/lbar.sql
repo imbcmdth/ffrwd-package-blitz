@@ -9,17 +9,13 @@
 -- rendering an HTML page on the programme's clock: ffrwd runs a module
 -- reading several streams only when they come from one point through
 -- modules that emit one frame per frame in, so two independent sources
--- cannot be its two inputs (see the README). The compose1 in the CTE
--- shows the programme unchanged and hands every frame back uncopied; it is
--- there because ffrwd 0.27.4 puts yuv420p on a sidecar's input edge when
--- that edge ends at a split rather than at a module, and these modules
--- take rgba.
+-- cannot be its two inputs (see the README).
 --
 -- variables: dest (output path)
 -- example: ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 COPY (
   WITH p AS (
-    SELECT ffrwd.blitz.compose1(s.video[1]) AS v
+    SELECT s.video[1] AS v
     FROM input('testsrc2=size=1920x1080:rate=30:duration=12', format => 'lavfi') s
   )
   SELECT ffrwd.blitz.compose2(

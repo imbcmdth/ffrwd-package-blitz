@@ -186,7 +186,7 @@ order of `at`; rows with the same `at` keep their arrival order.
    `select`; other rows are ignored. `tests/stream_rows.sql` does this with
    a test module, and `tests/stream_rows2.sql` does it on `compose2`.
 3. **A live or data stream** (JSON messages from `ffrwd/vast`,
-   `ffrwd/ortb` or a run-time lateral): ffrwd 0.27.4 has no path from a
+   `ffrwd/ortb` or a run-time lateral): ffrwd 0.27.6 has no path from a
    `data_stream` to a frame module. See Limitations, 9.
 
 ### Timing
@@ -271,10 +271,11 @@ sidecar's transport comes on top.
   elements parsed (400 elements add about 3 ms).
 - **This package's example** (`examples/lbar.sql`, 12 s of 1080p30, two
   1080p documents rendered a frame: the ad page and the composite), whole
-  `ffrwd run` including compile and module load: 48.6 fps with the default
-  worker pool, 27.5 fps with `--jobs 1` (median of 3 runs each). On one
-  worker the composite costs 15.3 ms mean (18.4 ms p95) a rendered frame,
-  the ad page 8.0 ms, and a bypassed frame 0.08 ms.
+  `ffrwd run` including compile and module load, ffrwd 0.27.6: 37.6 fps
+  with the default worker pool, 32.3 fps with `--jobs 1` (median of 3 runs
+  each). The composite runs on one worker either way; the pool helps only
+  the ad page. On one worker the composite costs 15.3 ms mean (18.4 ms
+  p95) a rendered frame, the ad page 8.0 ms, and a bypassed frame 0.08 ms.
 
 Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
 
@@ -320,7 +321,7 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
    and in 0.1.0 that holds for a two- or three-input compose driven by
    `changes` alone too. One worker is enough for 1080p30 and not for 4K30
    (see Performance). A host that hands each worker the rows of the frames
-   it skipped (planned as `ffrwd:av` 0.19.0) lets all three run
+   it skipped (planned for a later `ffrwd:av` world) lets all three run
    frame-parallel; the modules already apply such rows at their own
    times.
 9. **Also:**
@@ -344,14 +345,16 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
      programme's clock. An ad from `ffrwd/vast` arrives as a run-time
      lateral whose streams go only to feeders, which these modules do not
      have yet.
-   - **ffrwd 0.27.4 puts yuv420p on the sidecar's input edge when one
-     stream feeds two inputs** (the edge ends at a `split`, not at a
-     module), and these modules take rgba. Pass the stream through
-     `compose1` first: `WITH p AS (SELECT ffrwd.blitz.compose1(s.video[1])
-     AS v FROM ...)`. With the default document it hands every frame back
-     uncopied.
+   - **A stream that also goes somewhere outside the sidecar** (an
+     encoder, a data filter's clock) and feeds two of these inputs reaches
+     the sidecar on two pipes, which ffrwd refuses ("reads 2 streams and
+     hosts no packet sink or filter"). Pass it through `compose1` first,
+     `WITH p AS (SELECT ffrwd.blitz.compose1(s.video[1]) AS v FROM ...)`,
+     so it enters on one pipe and is split inside the sidecar. With the
+     default document `compose1` hands every frame back uncopied. A stream
+     read only by these modules needs no such pass, as in the example.
    - **No data streams.** A `data_stream` cannot reach a frame module in
-     ffrwd 0.27.4: a stream parameter must be video or audio, a feeder's
+     ffrwd 0.27.6: a stream parameter must be video or audio, a feeder's
      kind must be `video` or `audio`, and a run-time lateral's streams go
      only to feeders. The smallest addition is a `data` feeder kind: the
      compiler accepts a `data_stream` in a feeder position and writes the
