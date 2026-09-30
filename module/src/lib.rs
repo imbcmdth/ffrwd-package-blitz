@@ -202,7 +202,7 @@ pub fn process(shape: &Shape, window: &InWindow, last: bool) -> Processed {
                 eprintln!("{name}: row error: {e}");
             }
             if let Some(line) = inst.session.frame_line(t) {
-                eprintln!("{line}");
+                eprintln!("{name} {line}");
             }
             frames.push(OutFrame {
                 pts,

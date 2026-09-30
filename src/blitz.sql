@@ -24,7 +24,9 @@
 --   bypass      hand the first input back without copying it on frames the
 --               document shows as nothing but that input, 1:1 over the
 --               whole frame.
---   log         'off', 'summary' (a line at open and one at the end) or
+--   log         'off' (errors only), 'summary' (a line when an instance
+--               opens and one when it ends; a frame-parallel lane opens
+--               an instance per worker) or
 --               'frame' (one line per frame on stderr).
 
 -- `compose` reads one video input, and change rows from `changes` and from
@@ -41,7 +43,7 @@ CREATE FUNCTION compose(v video_stream,
                         css_height number DEFAULT NULL,
                         fit text DEFAULT 'contain',
                         bypass boolean DEFAULT true,
-                        log text DEFAULT 'summary')
+                        log text DEFAULT 'off')
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
@@ -60,7 +62,7 @@ CREATE FUNCTION compose1(v video_stream,
                          css_height number DEFAULT NULL,
                          fit text DEFAULT 'contain',
                          bypass boolean DEFAULT true,
-                         log text DEFAULT 'summary')
+                         log text DEFAULT 'off')
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose1.wasm', 'compose1' LANGUAGE wasm;
 
@@ -74,7 +76,7 @@ CREATE FUNCTION compose2(v0 video_stream,
                          css_height number DEFAULT NULL,
                          fit text DEFAULT 'contain',
                          bypass boolean DEFAULT true,
-                         log text DEFAULT 'summary')
+                         log text DEFAULT 'off')
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose2.wasm', 'compose2' LANGUAGE wasm;
 
@@ -89,6 +91,6 @@ CREATE FUNCTION compose3(v0 video_stream,
                          css_height number DEFAULT NULL,
                          fit text DEFAULT 'contain',
                          bypass boolean DEFAULT true,
-                         log text DEFAULT 'summary')
+                         log text DEFAULT 'off')
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose3.wasm', 'compose3' LANGUAGE wasm;

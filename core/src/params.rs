@@ -53,7 +53,7 @@ impl Default for Params {
             css_height: None,
             fit: Fit::Contain,
             bypass: true,
-            log: Log::Summary,
+            log: Log::Off,
         }
     }
 }

@@ -90,3 +90,33 @@ fn workers_driven_by_parameters_alone_render_as_one_instance() {
         assert_eq!(diff(&a, &b), (0, 0), "frame {i} differs");
     }
 }
+
+/// A worker opened late, or one whose frames are far apart, resolves across
+/// many iterations of a short loop at once; it renders what one instance
+/// rendering every frame renders.
+#[test]
+fn a_worker_opened_late_renders_a_short_loop_as_one_instance() {
+    let html = doc(
+        "#b { position: absolute; left: 10px; top: 10px; width: 40px; height: 40px; background: #fff;
+              animation: pulse 0.2s ease-in-out infinite; }
+         #c { position: absolute; left: 60px; top: 10px; width: 40px; height: 40px; background: #f80;
+              animation: slide 0.7s linear infinite alternate; }
+         @keyframes pulse { 0%, 100% { opacity: 0.2 } 50% { opacity: 1 } }
+         @keyframes slide { from { transform: translateX(0) } to { transform: translateX(30px) } }",
+        r#"<div id="b"></div><div id="c"></div>"#,
+    );
+    let mut one = session(&html, 128, 64, 1);
+    let mut late = session(&html, 128, 64, 1);
+    let mut sparse = session(&html, 128, 64, 1);
+    for i in 0..=183 {
+        let a = bytes(render(&mut one, 128, 64, ft(i), i).0);
+        if i == 183 {
+            let b = bytes(render(&mut late, 128, 64, ft(i), i).0);
+            assert_eq!(diff(&a, &b), (0, 0), "opened at frame {i}");
+        }
+        if i % 16 == 0 {
+            let c = bytes(render(&mut sparse, 128, 64, ft(i), i).0);
+            assert_eq!(diff(&a, &c), (0, 0), "every 16th frame, frame {i}");
+        }
+    }
+}

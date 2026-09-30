@@ -231,6 +231,25 @@ impl Compositor {
         r
     }
 
+    /// The shortest `animation-duration` above zero in the document as last
+    /// resolved, in seconds.
+    pub fn shortest_animation(&self) -> Option<f64> {
+        let mut shortest: Option<f64> = None;
+        for (_, node) in self.doc.tree().iter() {
+            let Some(styles) = node.primary_styles() else {
+                continue;
+            };
+            let ui = styles.get_ui();
+            for i in 0..ui.animation_duration_count() {
+                let d = ui.animation_duration_at(i).seconds() as f64;
+                if d > 0.0 && shortest.is_none_or(|s| d < s) {
+                    shortest = Some(d);
+                }
+            }
+        }
+        shortest
+    }
+
     /// Restyle and relayout at `time` seconds.
     pub fn resolve(&mut self, time: f64) {
         self.doc.resolve(time);

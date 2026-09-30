@@ -24,6 +24,20 @@ fn a_row_is_an_object_an_array_or_a_line_each() {
     assert_eq!(rows[1].at, Some(2.0));
     assert_eq!(rows[1].change, Change::Html("<p>y</p>".into()));
     assert!(Row::parse_list("").unwrap().is_empty());
+    // A list of rows whose elements are rows or arrays of rows, and lines
+    // that are arrays.
+    let nested = r##"[{"at": 2, "select": "#a", "text": "1"},
+                      [{"at": 3, "select": "#b", "text": "2"}, {"at": 3, "select": "#c", "text": "3"}],
+                      {"at": 4, "select": "#d", "text": "4"}]"##;
+    let rows = Row::parse_list(nested).unwrap();
+    let texts: Vec<_> = rows.iter().map(|r| r.select.as_str()).collect();
+    assert_eq!(texts, ["#a", "#b", "#c", "#d"]);
+    let lines = "[{\"select\": \"#a\", \"text\": \"1\"}, {\"select\": \"#b\", \"text\": \"2\"}]
+{\"select\": \"#c\", \"text\": \"3\"}";
+    assert_eq!(Row::parse_list(lines).unwrap().len(), 3);
+    let (rows, errors) =
+        Row::from_upstream(r##"[[{"select": "#a", "text": "1"}], {"select": "#b", "text": "2"}]"##);
+    assert_eq!((rows.len(), errors.len()), (2, 0));
 }
 
 #[test]
@@ -51,7 +65,7 @@ fn a_malformed_row_says_why() {
         (r#"{"select": "a", "text": 5}"#, "exactly one"),
         (r#"{"at": "soon", "select": "a", "text": "x"}"#, "number"),
         (r#"{"select": "a", "change": "foo"}"#, "must start with"),
-        (r#"[1, 2]"#, "select"),
+        (r#"[1, 2]"#, "objects"),
     ] {
         let err = Row::parse_list(row).unwrap_err();
         assert!(err.contains(why), "{row}: {err}");

@@ -149,7 +149,8 @@ impl Row {
         Ok(Row { at, select, change })
     }
 
-    /// A JSON array of rows, one row object, or one row object per line.
+    /// Rows as JSON text: one row object, an array, or one of those per
+    /// line.
     pub fn parse_list(s: &str) -> Result<Vec<Row>, String> {
         let s = s.trim();
         if s.is_empty() {
@@ -158,21 +159,27 @@ impl Row {
         if let Ok(v) = serde_json::from_str::<Value>(s) {
             return Row::from_json_value(&v);
         }
-        s.lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| {
-                let v: Value = serde_json::from_str(l).map_err(|e| e.to_string())?;
-                Row::from_value(&v)
-            })
-            .collect()
+        let mut rows = Vec::new();
+        for l in s.lines().filter(|l| !l.trim().is_empty()) {
+            let v: Value = serde_json::from_str(l).map_err(|e| e.to_string())?;
+            rows.extend(Row::from_json_value(&v)?);
+        }
+        Ok(rows)
     }
 
-    /// An array of rows or a single row.
+    /// One row object, or an array whose elements are rows or arrays of
+    /// rows, in order.
     pub fn from_json_value(v: &Value) -> Result<Vec<Row>, String> {
         match v {
-            Value::Array(a) => a.iter().map(Row::from_value).collect(),
+            Value::Array(a) => {
+                let mut rows = Vec::new();
+                for item in a {
+                    rows.extend(Row::from_json_value(item)?);
+                }
+                Ok(rows)
+            }
             Value::Object(_) => Ok(vec![Row::from_value(v)?]),
-            _ => Err("rows must be an object or an array of objects".into()),
+            _ => Err("rows must be objects, or arrays of objects".into()),
         }
     }
 
@@ -184,10 +191,14 @@ impl Row {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return (rows, errors);
         };
-        let items: Vec<&Value> = match &v {
-            Value::Array(a) => a.iter().collect(),
-            other => vec![other],
-        };
+        fn flatten<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+            match v {
+                Value::Array(a) => a.iter().for_each(|i| flatten(i, out)),
+                other => out.push(other),
+            }
+        }
+        let mut items = Vec::new();
+        flatten(&v, &mut items);
         for item in items {
             if !Row::is_change(item) {
                 continue;
@@ -342,6 +353,13 @@ fn outermost(doc: &BaseDocument, ids: &[NodeId]) -> Vec<NodeId> {
         .collect()
 }
 
+/// The smallest step between the resolves that carry an animation across a
+/// gap, and the most of them one resolve makes: an animation shorter than
+/// two milliseconds, or a gap of over a thousand steps, is carried in
+/// bigger ones.
+const MIN_STEP: f64 = 0.001;
+const MAX_STEPS: usize = 1000;
+
 /// A row with the time it applies at, settled.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Timed {
@@ -369,6 +387,8 @@ pub struct Timeline {
     log: Vec<Timed>,
     /// The latest stream time the document was resolved at.
     clock: f64,
+    /// The shortest animation in the document as last resolved, seconds.
+    shortest: Option<f64>,
     pub errors: Vec<String>,
 }
 
@@ -384,6 +404,7 @@ impl Timeline {
             pending: Vec::new(),
             log: Vec::new(),
             clock: f64::NEG_INFINITY,
+            shortest: None,
             errors: Vec::new(),
         }
     }
@@ -440,10 +461,36 @@ impl Timeline {
         }
     }
 
+    /// Resolves at `t` (never before the last resolve).
     fn resolve(&mut self, c: &mut Compositor, t: f64) {
         let t = t.max(self.clock);
         c.resolve(t);
         self.clock = t;
+        self.shortest = c.shortest_animation();
+    }
+
+    /// Resolves at steps from the last resolve up to, not including, `t`,
+    /// when the gap is longer than half the shortest animation: Blitz moves
+    /// a CSS animation on by at most one iteration per resolve (it calls
+    /// Stylo's `iterate_if_necessary` once per resolve), so a resolve that
+    /// jumps two iterations samples the animation clamped to the end of the
+    /// one it is in. With the steps, an instance that skips frames (a
+    /// frame-parallel worker, or one opened late) renders what an instance
+    /// that saw every frame renders. It runs before anything due at `t` is
+    /// applied, so no change is seen early.
+    fn catch_up(&mut self, c: &mut Compositor, t: f64) {
+        if !self.clock.is_finite() {
+            return;
+        }
+        let mut n = 0;
+        while let Some(d) = self.shortest {
+            let s = self.clock + (d * 0.5).max(MIN_STEP);
+            if s >= t || n == MAX_STEPS {
+                break;
+            }
+            self.resolve(c, s);
+            n += 1;
+        }
     }
 
     /// Resolves the document once at `epoch`, the time every instance's
@@ -458,6 +505,7 @@ impl Timeline {
     pub fn advance(&mut self, c: &mut Compositor, t: f64) -> Step {
         let mut step = self.replay_due(c, t);
         let s = Instant::now();
+        self.catch_up(c, t);
         self.resolve(c, t);
         step.resolve_us = s.elapsed().as_secs_f64() * 1e6;
         step
@@ -478,6 +526,7 @@ impl Timeline {
             // resolve: Stylo's clock must not run backwards.
             let group_at = first.at;
             let at = group_at.max(self.clock);
+            self.catch_up(c, at);
             let s = Instant::now();
             step.full_page |= self.apply_one(c, first, at);
             while rows.peek().is_some_and(|r| r.at == group_at) {
