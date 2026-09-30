@@ -73,8 +73,8 @@ pub fn describe(shape: &Shape) -> WindowMeta {
             name: shape.name.to_string(),
             version: VERSION.to_string(),
             params_schema: SCHEMA.to_string(),
-            // The rows it emits: none. What `compose` reads is declared on
-            // the call's annotation column (src/blitz.sql).
+            // The rows it emits: none. What a module reads is declared on
+            // its function's annotation column (src/blitz.sql).
             rows_schema: String::new(),
             pixel_formats: vec![PIXEL_FORMAT.to_string()],
             sample_formats: vec![],
@@ -170,10 +170,13 @@ pub fn process(shape: &Shape, window: &InWindow, last: bool) -> Processed {
             let pts = window.pts(0);
             let t = pts as f64 * inst.tick;
             if shape.reads_rows {
+                // Payload 0 is pad 0, the one pad rows arrive on, however
+                // many inputs the module reads.
                 // TODO(ffrwd:av 0.19): declare `rows: state` in describe and
                 // fold `window.earlier_rows()` here first, each entry at its
-                // own pts, before the frame's own rows; then `compose` is
-                // pure. Session::fold already takes rows at any earlier time.
+                // own pts, before the frame's own rows; then the modules
+                // reading rows are pure. Session::fold already takes rows at
+                // any earlier time.
                 let lines = window.rows(0);
                 if !lines.is_empty() {
                     inst.session.fold(t, &lines);

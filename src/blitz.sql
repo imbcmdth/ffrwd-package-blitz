@@ -47,12 +47,9 @@ CREATE FUNCTION compose(v video_stream,
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
--- `compose1`, `compose2` and `compose3` read one, two or three video
--- inputs, all at the same pts, and take change rows from `changes` alone.
--- Nothing else drives the document, so the host may spread frames over
--- workers, which is what 4K needs. ffrwd runs a module reading several
--- streams only when they come from one point, through modules that emit
--- one frame per frame in: see the README.
+-- `compose1` reads one video input and takes change rows from `changes`
+-- alone. Nothing else drives the document, so the host may spread frames
+-- over workers, which is what 4K needs.
 CREATE FUNCTION compose1(v video_stream,
                          html text DEFAULT '',
                          changes text DEFAULT '',
@@ -66,8 +63,19 @@ CREATE FUNCTION compose1(v video_stream,
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose1.wasm', 'compose1' LANGUAGE wasm;
 
+-- `compose2` and `compose3` read two or three video inputs, all at the
+-- same pts, and change rows from `changes` and from the rows arriving with
+-- the first input's frames (`stream_changes`, after the streams; rows on
+-- the other inputs never reach the module). Like `compose` they run on one
+-- worker. The column on a function reading several streams needs ffrwd
+-- 0.27.6; earlier compilers refuse the declaration, and with it this file
+-- and the package. ffrwd runs a module reading several streams only when
+-- they come from one point, through modules that emit one frame per frame
+-- in: see the README.
 CREATE FUNCTION compose2(v0 video_stream,
                          v1 video_stream,
+                         stream_changes STRUCT(at number, "select" text, change text,
+                                               text text, html text)[] DEFAULT NULL,
                          html text DEFAULT '',
                          changes text DEFAULT '',
                          width number DEFAULT NULL,
@@ -83,6 +91,8 @@ RETURNS video_stream
 CREATE FUNCTION compose3(v0 video_stream,
                          v1 video_stream,
                          v2 video_stream,
+                         stream_changes STRUCT(at number, "select" text, change text,
+                                               text text, html text)[] DEFAULT NULL,
                          html text DEFAULT '',
                          changes text DEFAULT '',
                          width number DEFAULT NULL,

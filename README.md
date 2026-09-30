@@ -25,9 +25,12 @@ it, and the programme grows back.
 
 ## Requires
 
-ffrwd 0.27.4 or later. The modules are built against `ffrwd:av@0.18.0`
-(the `window-module` world). The package needs no capabilities: no
-network, no files, no GPU.
+ffrwd 0.27.6 or later. `compose2` and `compose3` declare a rows column
+beside several streams, which ffrwd 0.27.4 and 0.27.5 refuse, and a
+refused declaration stops the whole package loading: on those versions a
+query calling `compose` or `compose1` fails too. The modules are built
+against `ffrwd:av@0.18.0` (the `window-module` world). The package needs
+no capabilities: no network, no files, no GPU.
 
 ## A minimal query
 
@@ -66,16 +69,17 @@ ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 |---|---|---|---|
 | `compose` | 1 | `changes`, and rows arriving with the frames | one |
 | `compose1` | 1 | `changes` | frame-parallel |
-| `compose2` | 2 | `changes` | frame-parallel |
-| `compose3` | 3 | `changes` | frame-parallel |
+| `compose2` | 2 | `changes`, and rows arriving with the first input's frames | one |
+| `compose3` | 3 | `changes`, and rows arriving with the first input's frames | one |
 
 A module's describe cannot depend on its parameters, so each shape is a
-module of its own. `compose` keeps what rows arriving with frames did from
-one frame to the next, and a host spreading frames over workers hands each
-worker only its own frames' rows, so `compose` runs on one worker. The
-others depend on their parameters alone, so the sidecar spreads them over
-its worker pool and the output is the same at any worker count (the
-example renders byte-identical at 1, 4 and 16 workers).
+module of its own. `compose`, `compose2` and `compose3` keep what rows
+arriving with frames did from one frame to the next, and a host spreading
+frames over workers hands each worker only its own frames' rows, so they
+run on one worker. In 0.1.0 every compose of two or three inputs runs on
+one worker, whether or not a stream sends it rows. `compose1` depends on
+its parameters alone, so the sidecar spreads it over its worker pool and
+the output is the same at any worker count.
 
 ## The document
 
@@ -153,20 +157,34 @@ order of `at`; rows with the same `at` keep their arrival order.
 1. **The `changes` parameter**: JSON text holding one row, an array of
    rows (whose elements may themselves be arrays), or one row or array per
    line. Every export takes it.
-2. **Rows arriving with the frames** (`compose` only): an upstream module
-   that emits rows beside its frames. `compose` declares them as its
-   `stream_changes` column, right after its stream, so writing the
-   producer's call inside `compose`'s passes both:
+2. **Rows arriving with the frames** (`compose`, `compose2` and
+   `compose3`): an upstream module that emits rows beside its frames.
+   `compose` declares them as its `stream_changes` column, right after its
+   stream, so writing the producer's call inside `compose`'s passes both:
 
    ```pgsql
    SELECT ffrwd.blitz.compose(my_cues(f.video[1]), html => ...)
    ```
 
+   `compose2` and `compose3` declare the column after their streams. The
+   rows are the ones arriving with the first stream's frames, so the
+   producer's call goes in the first position; rows on the second and
+   third streams never reach the module. This is what needs ffrwd 0.27.6:
+   earlier compilers refuse the column on a function reading several
+   streams.
+
+   ```pgsql
+   SELECT ffrwd.blitz.compose2(my_cues(p.v), p.v, html => ...)
+   ```
+
+   Rows apply as they do on `compose`: at their `at`, arrays accepted, a
+   later `at` scheduled, and kept in the log.
+
    ffrwd matches the producer's record to the column field for field, so
    the producer declares exactly `STRUCT(at number, "select" text, change
    text, text text, html text)[]`. A row is a change row when it has
    `select`; other rows are ignored. `tests/stream_rows.sql` does this with
-   a test module.
+   a test module, and `tests/stream_rows2.sql` does it on `compose2`.
 3. **A live or data stream** (JSON messages from `ffrwd/vast`,
    `ffrwd/ortb` or a run-time lateral): ffrwd 0.27.4 has no path from a
    `data_stream` to a frame module. See Limitations, 9.
@@ -204,8 +222,8 @@ order of `at`; rows with the same `at` keep their arrival order.
 | `bypass` | boolean | `true` | Hand input 0 back uncopied on frames that are nothing but it. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). A frame-parallel lane opens an instance per worker. |
 
-`compose` also takes `stream_changes`, the rows column; the call fills it
-from the producer.
+`compose`, `compose2` and `compose3` also take `stream_changes`, the rows
+column; the call fills it from the producer.
 
 ### Canvas, design size and output
 
@@ -297,11 +315,14 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
    text falls back to DejaVu Sans. A whole font is too big for the
    parameters on Windows (see below), so subset it to the glyphs the page
    uses.
-8. **Frame-parallel only when changes come from parameters.** `compose`,
-   which reads rows arriving with frames, runs on one worker with ffrwd
-   0.27.4. A host that hands each worker the rows of the frames it skipped
-   (planned as `ffrwd:av` 0.19.0) lets `compose` run frame-parallel as
-   well; the module already applies such rows at their own times.
+8. **Frame-parallel only on `compose1`.** `compose`, `compose2` and
+   `compose3` read rows arriving with frames, so they run on one worker,
+   and in 0.1.0 that holds for a two- or three-input compose driven by
+   `changes` alone too. One worker is enough for 1080p30 and not for 4K30
+   (see Performance). A host that hands each worker the rows of the frames
+   it skipped (planned as `ffrwd:av` 0.19.0) lets all three run
+   frame-parallel; the modules already apply such rows at their own
+   times.
 9. **Also:**
    - **The root element's background image does not fill the page**; only
      its colour does. Give `html, body { height: 100% }`, or put the
@@ -344,8 +365,11 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
      must fit in Windows' 32,767-character command line (Linux allows
      128 KiB per argument). The sidecar reads `-params-from <file>`, which
      ffrwd's compiler does not use yet.
-   - **`compose2` and `compose3` cannot take rows from a stream**: ffrwd
-     refuses an annotation column on a module reading several streams.
+   - **`compose2` and `compose3` take rows from their first stream
+     only**, and need ffrwd 0.27.6 for it. ffrwd 0.27.4 and 0.27.5 refuse
+     an annotation column on a function reading several streams, and they
+     read every declaration of a package before running any of it, so on
+     them no export of this package loads (see Requires).
    - **Short animations cost extra resolves.** Blitz moves a CSS animation
      on by at most one iteration per resolve, so when frames are further
      apart than half the shortest animation (a frame-parallel worker, or
@@ -369,10 +393,13 @@ target/wasm32-wasip2/release/compose.wasm` prints what a module declares.
 The native tests (`core/tests/compose`) cover row parsing and ordering,
 replay timing (an animation and a transition inserted at 3.01 s start at
 3.01 s), late joiners, frame-parallel workers with and without the rows of
-skipped frames, the bypass and which inputs are fetched, the design scale
-at 720p, 1080p and 4K, 16:9, 9:16 and square canvases, whole-pixel versus
-transform motion, fonts and images. They take under a second once built.
-`tests/stream_rows.sql` runs change rows from a stream through the sidecar.
+skipped frames, rows on two and three inputs, the bypass and which inputs
+are fetched, the design scale at 720p, 1080p and 4K, 16:9, 9:16 and square
+canvases, whole-pixel versus transform motion, fonts and images. They take
+under a second once built.
+`tests/stream_rows.sql` runs change rows from a stream through the sidecar,
+and `tests/stream_rows2.sql` does the same on the first input of `compose2`
+(ffrwd 0.27.6).
 
 ## License
 
