@@ -1,0 +1,36 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Blitz and Stylo, four modules, full LTO.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ffrwd and the wit package
+        run: |
+          pip install ffrwd ffrwd-wasm
+          ffrwd install
+      - name: Build the modules
+        run: cargo build --target wasm32-wasip2 --release
+      - name: Describe the modules
+        run: |
+          for module in compose compose1 compose2 compose3; do
+            ffrwd-wasm --describe "target/wasm32-wasip2/release/$module.wasm"
+          done
+      - name: Unit tests
+        run: cargo test -p blitz-compose-core
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Lints
+        run: cargo clippy --target wasm32-wasip2 --release --all-targets -- -D warnings
