@@ -1,0 +1,15 @@
+[package]
+name = "emit-changes"
+description = "Test only: a window filter that emits change rows beside its frames, to drive `compose` from a stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "emit_changes"
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+serde_json.workspace = true

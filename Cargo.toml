@@ -15,6 +15,9 @@ members = [
     "compose1",
     "compose2",
     "compose3",
+    # Test only: emits change rows, for the end-to-end test of rows that
+    # arrive with frames. The lib SQL does not name it.
+    "tests/producer",
 ]
 resolver = "2"
 

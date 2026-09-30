@@ -21,7 +21,7 @@ wit_bindgen::generate!({
 use std::cell::RefCell;
 
 pub use compose_core;
-use compose_core::params::{Params, ROWS_SCHEMA, SCHEMA};
+use compose_core::params::{Params, SCHEMA};
 use compose_core::{Output, Session};
 use exports::ffrwd::av::window_filter::{
     Format, FramePayload, InWindow, Meta, OutFrame, Processed, StreamInfo, WindowMeta,
@@ -73,12 +73,9 @@ pub fn describe(shape: &Shape) -> WindowMeta {
             name: shape.name.to_string(),
             version: VERSION.to_string(),
             params_schema: SCHEMA.to_string(),
-            // What it reads, not what it emits: it emits no rows.
-            rows_schema: if shape.reads_rows {
-                ROWS_SCHEMA.to_string()
-            } else {
-                String::new()
-            },
+            // The rows it emits: none. What `compose` reads is declared on
+            // the call's annotation column (src/blitz.sql).
+            rows_schema: String::new(),
             pixel_formats: vec![PIXEL_FORMAT.to_string()],
             sample_formats: vec![],
             sample_rates: vec![],

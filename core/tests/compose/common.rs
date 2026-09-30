@@ -41,7 +41,11 @@ pub fn picture(w: u32, h: u32, input: u32, n: usize) -> Vec<u8> {
             let i = (y * w + x) * 4;
             f[i] = ((x * 255 / w.max(1)) as u8).wrapping_add((n * 7) as u8);
             f[i + 1] = (y * 255 / h.max(1)) as u8;
-            f[i + 2] = if ((x + n) / 37) % 2 == 0 { 40 } else { 200 } ^ (input as u8 * 90);
+            f[i + 2] = if ((x + n) / 37).is_multiple_of(2) {
+                40
+            } else {
+                200
+            } ^ (input as u8 * 90);
         }
     }
     f
@@ -77,7 +81,7 @@ pub fn diff(a: &[u8], b: &[u8]) -> (u8, usize) {
     assert_eq!(a.len(), b.len());
     let mut max = 0u8;
     let mut n = 0usize;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         let d = pa
             .iter()
             .zip(pb)

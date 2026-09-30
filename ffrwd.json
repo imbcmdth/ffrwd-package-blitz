@@ -29,5 +29,9 @@
   "bin": {
     "lbar": "examples/lbar.sql"
   },
+  "files": [
+    "THIRD_PARTY_NOTICES",
+    "core/assets/DejaVu-LICENSE"
+  ],
   "test": "cargo fmt --all --check && cargo clippy --target wasm32-wasip2 --release --all-targets -- -D warnings && cargo test -p blitz-compose-core"
 }

@@ -1,13 +1,26 @@
-# Build output, including whatever `cargo test` leaves behind. The three
-# files the lib SQL names are pulled back in by the manifest's closure; the
-# rest of the directory stays out of the archive.
+# Build output, including whatever `cargo test` leaves behind. The four
+# modules the lib SQL names are pulled back in by the manifest's closure;
+# the rest of the directory stays out of the archive.
 target/
 
-# The wit the module's build.rs copies in, which is the sidecar's own.
+# The Rust the modules are built from, the test module and queries, and the
+# scripts that write the test fonts and THIRD_PARTY_NOTICES: the archive is
+# the built modules, and the source is at the homepage.
+core/
+module/
+compose/
+compose1/
+compose2/
+compose3/
+tests/
+scripts/
+Cargo.toml
+Cargo.lock
 wit/
 
-# The native tests and their fixtures are not package content.
-core/tests/
+# The README's stills are linked from the repository, not shipped.
+examples/*.png
 
 # Local development state, not package content.
 ffrwd.lock
+runs/
