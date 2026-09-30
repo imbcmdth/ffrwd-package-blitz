@@ -1,0 +1,7 @@
+target/
+wit/
+ffrwd.lock.bak
+ffrwd.links
+*.mkv
+*.nut
+/runs/

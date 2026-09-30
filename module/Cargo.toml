@@ -1,0 +1,14 @@
+[package]
+name = "blitz-compose-module"
+description = "The window-filter shim every compose module shares: the ffrwd:av bindings, the instance, and one frame's work"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "compose_module"
+
+[dependencies]
+blitz-compose-core = { path = "../core" }
+wit-bindgen.workspace = true
+ffrwd-frame.workspace = true

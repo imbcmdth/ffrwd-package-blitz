@@ -1,0 +1,12 @@
+[package]
+name = "compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "compose"
+crate-type = ["cdylib"]
+
+[dependencies]
+blitz-compose-module = { path = "../module" }

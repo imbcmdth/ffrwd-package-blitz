@@ -1,0 +1,13 @@
+# Build output, including whatever `cargo test` leaves behind. The three
+# files the lib SQL names are pulled back in by the manifest's closure; the
+# rest of the directory stays out of the archive.
+target/
+
+# The wit the module's build.rs copies in, which is the sidecar's own.
+wit/
+
+# The native tests and their fixtures are not package content.
+core/tests/
+
+# Local development state, not package content.
+ffrwd.lock

@@ -1,0 +1,63 @@
+[workspace]
+# The four wasm modules this package ships, and the Rust under them.
+# `compose`, `compose1`, `compose2` and `compose3` build into
+# target/wasm32-wasip2/release/, which is where the package's lib SQL names
+# them. A module's describe cannot depend on its parameters, so each shape
+# (how many video inputs, whether it reads rows, whether it may run
+# frame-parallel) is a module of its own; each is a few lines over
+# `module`, the window-filter shim they share. `core` is the compositor
+# itself (Blitz, the change rows, the bypass decision), testable on the
+# native target.
+members = [
+    "core",
+    "module",
+    "compose",
+    "compose1",
+    "compose2",
+    "compose3",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/imbcmdth/ffrwd-package-blitz"
+
+[workspace.dependencies]
+# Blitz by git rev, the one the spike measured (main, 0.3.0-beta.2). Its own
+# workspace pins taffy (git fb461a78) and parley (git e52cf10b); Cargo.lock
+# pins the rest (stylo 0.21.0, anyrender 0.13.0, anyrender_vello_cpu 0.17.0).
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "c20690f3bc2e1f50e428acd7b5d2fe3545ec6f32", default-features = false, features = ["woff", "svg"] }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "c20690f3bc2e1f50e428acd7b5d2fe3545ec6f32", default-features = false }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "c20690f3bc2e1f50e428acd7b5d2fe3545ec6f32", default-features = false, features = ["svg"] }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "c20690f3bc2e1f50e428acd7b5d2fe3545ec6f32", default-features = false }
+parley = { git = "https://github.com/linebender/parley", rev = "e52cf10bf96f10b1fdccb77199f38d57dd075a19", default-features = false, features = ["std"] }
+anyrender = "0.13.0"
+# No `multithreading`: wasm32-wasip2 has no threads.
+anyrender_vello_cpu = { version = "0.17.0", default-features = false }
+peniko = "0.6.0"
+kurbo = "0.13.1"
+serde_json = "1"
+data-url = "0.3.1"
+# The decoders `data:` images need, switched on in the `image` crate
+# blitz-dom already links.
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
+wit-bindgen = "0.57.1"
+# The owner's rgba frame check.
+ffrwd-frame = { git = "https://github.com/imbcmdth/ffrwd-frame", rev = "de7db7834977ad93545f1af24345b297df2d670f" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+# The native tests drive Stylo, which is slow unoptimised; the dependencies
+# are built optimised so `cargo test` stays quick without an LTO link.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,33 @@
+{
+  "name": "ffrwd/blitz",
+  "version": "0.1.0",
+  "description": "An HTML/CSS video compositor: a static HTML document with the video inputs as images, driven over time by change rows, rendered by Blitz (Stylo, Taffy, Parley, Vello CPU) in the wasm sidecar.",
+  "license": "MIT",
+  "homepage": "https://github.com/imbcmdth/ffrwd-package-blitz",
+  "capabilities": [],
+  "dependencies": {
+    "ffrwd/wasm": "0.18.0"
+  },
+  "keywords": [
+    "html",
+    "css",
+    "compositor",
+    "graphics",
+    "overlay",
+    "lower-third",
+    "l-bar",
+    "animation",
+    "blitz",
+    "rust"
+  ],
+  "lib": {
+    "compose": "src/blitz.sql",
+    "compose1": "src/blitz.sql",
+    "compose2": "src/blitz.sql",
+    "compose3": "src/blitz.sql"
+  },
+  "bin": {
+    "lbar": "examples/lbar.sql"
+  },
+  "test": "cargo fmt --all --check && cargo clippy --target wasm32-wasip2 --release --all-targets -- -D warnings && cargo test -p blitz-compose-core"
+}
