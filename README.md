@@ -245,37 +245,14 @@ whenever the design is scaled into bars.
 
 ## Performance
 
-Measured on a Ryzen 9 9950X (16 cores), Windows 11: the first five items
-in the proof of concept this package grew from, the last in this
-package's example. Times in ms are spent in the module per frame; the
-sidecar's transport comes on top.
-
-- **720p30, one worker**: a document with a squeezing programme, a lower
-  third and a logo costs 5.3 ms a frame held in the L-bar and 6.5 ms mean
-  (8.4 ms p95) mid-transition. A whole `ffrwd run` of 60 s ran at 122 fps
-  (4.1x real time) rendering every frame and 170 fps (5.7x) with the idle
-  bypass.
-- **1080p30, one worker**: the same document costs 14.2 ms mean (18.3 ms
-  p95) mid-transition, plus about 4.7 ms of transport; the run went at
-  59 fps (1.97x) rendering every frame and 80 fps (2.68x) with the bypass.
-- **4K30 needs frame-parallel workers**: one worker takes 32 ms for a
-  full-frame video and 57 to 68 ms with overlays, over a 33 ms budget. The
-  rgba pipe is the other limit: with ffrwd's default pipe buffers a module
-  that does nothing passes 16 fps of 4K rgba (43 fps with 1 MiB pipes).
-  The proof of concept reached real time at 4K only with the yuv420p
-  wire and 8 workers (35 fps); this package takes rgba.
-- **Idle bypass**: 0.06 to 0.36 ms a frame inside the module, against the
-  full render. The frame still crosses the pipes.
-- **Change rows**: a class or text change costs 0.1 to 0.2 ms on the frame
-  it lands; a full page about 0.5 to 1 ms; cost grows with the number of
-  elements parsed (400 elements add about 3 ms).
-- **This package's example** (`examples/lbar.sql`, 12 s of 1080p30, two
-  1080p documents rendered a frame: the ad page and the composite), whole
-  `ffrwd run` including compile and module load, ffrwd 0.27.6: 37.6 fps
-  with the default worker pool, 32.3 fps with `--jobs 1` (median of 3 runs
-  each). The composite runs on one worker either way; the pool helps only
-  the ad page. On one worker the composite costs 15.3 ms mean (18.4 ms
-  p95) a rendered frame, the ad page 8.0 ms, and a bypassed frame 0.08 ms.
+One worker renders a 1280x720 document with a squeezing programme, a lower
+third and a logo well inside a 33 ms frame, and 1920x1080 with room to
+spare. 4K30 does not fit on one worker, and in 0.1.0 every compose of two
+or three inputs runs on one. Idle frames that are nothing but input 0 are
+handed back without rendering (`bypass`), and a change row costs a
+fraction of a millisecond on the frame it lands. Measured figures will
+come with a later release; the ones from the package's proof of concept
+predate ffrwd 0.28.0 and its native transport.
 
 Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
 
@@ -319,8 +296,7 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
 8. **Frame-parallel only on `compose1`.** `compose`, `compose2` and
    `compose3` read rows arriving with frames, so they run on one worker,
    and in 0.1.0 that holds for a two- or three-input compose driven by
-   `changes` alone too. One worker is enough for 1080p30 and not for 4K30
-   (see Performance). A host that hands each worker the rows of the frames
+   `changes` alone too. One worker is enough for 1080p30 and not for 4K30. A host that hands each worker the rows of the frames
    it skipped (planned for a later `ffrwd:av` world) lets all three run
    frame-parallel; the modules already apply such rows at their own
    times.
