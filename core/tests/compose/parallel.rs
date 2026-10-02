@@ -80,7 +80,7 @@ fn workers_driven_by_parameters_alone_render_as_one_instance() {
             .join(",")
     );
     let mut p = params(&page());
-    p.changes = compose_core::Row::parse_list(&changes).unwrap();
+    p.rows = compose_core::Row::parse_list(&changes).unwrap();
     let mk = || compose_core::Session::new(p.clone(), (W, H), (W, H), 1);
     let mut one = mk();
     let mut ws: Vec<_> = (0..3).map(|_| mk()).collect();

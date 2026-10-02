@@ -67,27 +67,33 @@ fn a_row_on_pad_0_shows_the_second_input_at_its_time() {
     };
     // Nothing but input 0: the bypass, nothing fetched.
     let (out, fetched) = frame(&mut s, 0, &[]);
-    assert_eq!(out, compose_core::Output::Same);
+    assert_eq!(out, compose_core::Output::Same(0));
     assert!(fetched.is_empty());
     // A row arriving with frame 3, scheduled for frame 6's time: no change
     // until then.
     let at = ft(6);
     let row = format!(r##"{{"at": {at}, "select": "#b", "change": "+on"}}"##);
     let (out, _) = frame(&mut s, 3, &[&row]);
-    assert_eq!(out, compose_core::Output::Same);
+    assert_eq!(out, compose_core::Output::Same(0));
     let (out, _) = frame(&mut s, 5, &[]);
-    assert_eq!(out, compose_core::Output::Same);
-    // From its time on the frame is input 1, which covers input 0.
+    assert_eq!(out, compose_core::Output::Same(0));
+    // From its time on the frame is input 1, which covers input 0: handed
+    // back as it is, and rendering it gives the same picture.
     let (out, fetched) = frame(&mut s, 6, &[]);
+    assert_eq!(out, compose_core::Output::Same(1));
+    assert!(fetched.is_empty(), "fetched {fetched:?}");
+    s.params.bypass = false;
+    let (out, fetched) = frame(&mut s, 7, &[]);
     assert!(fetched.contains(&1), "fetched {fetched:?}");
-    assert_eq!(diff(&bytes(out), &pad(1, 6)), (0, 0));
+    assert_eq!(diff(&bytes(out), &pad(1, 7)), (0, 0));
+    s.params.bypass = true;
     // An array in one line, with no `at`: the frame it arrives with.
     let (out, fetched) = frame(
         &mut s,
         9,
         &[r##"[{"select": "#b", "change": "-on"}, {"select": "#a", "change": "+seen"}]"##],
     );
-    assert_eq!(out, compose_core::Output::Same);
+    assert_eq!(out, compose_core::Output::Same(0));
     assert!(fetched.is_empty());
     assert_eq!(s.timeline().log().len(), 3);
 }

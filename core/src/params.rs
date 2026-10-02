@@ -25,8 +25,8 @@ pub enum Log {
 pub struct Params {
     /// The document, as HTML text.
     pub html: String,
-    /// Change rows from the `changes` parameter.
-    pub changes: Vec<Row>,
+    /// Change rows from the `rows` parameter.
+    pub rows: Vec<Row>,
     /// The canvas the document is composed for, px; `None` follows the
     /// output frame.
     pub width: Option<f64>,
@@ -37,7 +37,7 @@ pub struct Params {
     pub css_height: Option<f64>,
     /// How the design fills the canvas when their aspects differ.
     pub fit: Fit,
-    /// Hand input 0 back untouched when the frame would be exactly it.
+    /// Hand an input back untouched when the frame would be exactly it.
     pub bypass: bool,
     pub log: Log,
 }
@@ -46,7 +46,7 @@ impl Default for Params {
     fn default() -> Self {
         Params {
             html: DEFAULT_HTML.into(),
-            changes: Vec::new(),
+            rows: Vec::new(),
             width: None,
             height: None,
             css_width: None,
@@ -58,11 +58,7 @@ impl Default for Params {
     }
 }
 
-/// The JSON Schema describe publishes, which the compiler checks a call's
-/// values against.
-pub const SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string"},"changes":{"type":"string"},"width":{"type":"number"},"height":{"type":"number"},"css_width":{"type":"number"},"css_height":{"type":"number"},"fit":{"type":"string","enum":["contain","stretch"]},"bypass":{"type":"boolean"},"log":{"type":"string","enum":["off","summary","frame"]}},"additionalProperties":false}"#;
-
-/// The JSON Schema of the change rows `compose` reads beside its stream.
+/// The JSON Schema of a change row.
 pub const ROWS_SCHEMA: &str = r#"{"type":"object","properties":{"at":{"type":"number"},"select":{"type":"string"},"change":{"type":"string"},"text":{"type":"string"},"html":{"type":"string"}},"required":["select"]}"#;
 
 impl Params {
@@ -87,12 +83,12 @@ impl Params {
                         p.html = s.to_string();
                     }
                 }
-                "changes" => {
-                    p.changes = match val {
+                "rows" => {
+                    p.rows = match val {
                         Value::String(s) => Row::parse_list(s),
                         other => Row::from_json_value(other),
                     }
-                    .map_err(|e| format!("changes: {e}"))?;
+                    .map_err(|e| format!("rows: {e}"))?;
                 }
                 "width" => p.width = Some(size(k, val)?),
                 "height" => p.height = Some(size(k, val)?),
@@ -125,7 +121,7 @@ impl Params {
     /// Whether the document has to be built again for `other`.
     pub fn same_document(&self, other: &Params) -> bool {
         self.html == other.html
-            && self.changes == other.changes
+            && self.rows == other.rows
             && self.width == other.width
             && self.height == other.height
             && self.css_width == other.css_width

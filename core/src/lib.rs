@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod net;
 pub mod params;
 pub mod placed;
+pub mod presence;
 pub mod probe;
 pub mod session;
 
@@ -99,13 +100,21 @@ struct VideoRef {
     input: u32,
 }
 
+/// The most video inputs one document reads.
+pub const MAX_INPUTS: u32 = 64;
+
+/// Input `input`'s bit in a mask of inputs.
+pub fn bit(input: u32) -> u64 {
+    1 << input.min(MAX_INPUTS - 1)
+}
+
 /// What the frame the document would paint needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// Bit `i`: input `i` is drawn somewhere inside the frame.
     pub drawn: u64,
-    /// The frame is input 0's picture, untouched.
-    pub bypass: bool,
+    /// The frame is this input's picture, untouched.
+    pub same: Option<u32>,
 }
 
 impl Plan {
@@ -119,11 +128,13 @@ pub struct Compositor {
     renderer: VelloCpuImageRenderer,
     geometry: Geometry,
     place: Placement,
-    inputs: u32,
-    /// One placeholder per input, all sharing one buffer of zeros: what a
-    /// video element holds until the frame's pixels are fetched. Its blob id
-    /// is how the probe tells which input a draw is.
-    placeholders: Vec<RasterImageData>,
+    /// Each input's picture size; none for an input this instance does not
+    /// read.
+    sizes: Vec<Option<(u32, u32)>>,
+    /// One placeholder per input read, transparent, sharing one buffer of
+    /// zeros per size: what a video element holds until the frame's pixels
+    /// are fetched. Its blob id is how the probe tells which input a draw is.
+    placeholders: Vec<Option<RasterImageData>>,
     placeholder_ids: Vec<(u64, u32)>,
     refs: Vec<VideoRef>,
     /// The rendered frame, RGBA8 (premultiplied, which is straight RGBA
@@ -133,8 +144,16 @@ pub struct Compositor {
 
 impl Compositor {
     /// A document `html` placed in the output frame as `geometry` says,
-    /// reading `inputs` video inputs.
+    /// reading `inputs` video inputs, each at the geometry's input size.
     pub fn new(html: &str, geometry: Geometry, inputs: u32) -> Self {
+        let size = Some((geometry.in_w, geometry.in_h));
+        Compositor::with_sizes(html, geometry, vec![size; inputs as usize])
+    }
+
+    /// A document `html` placed in the output frame as `geometry` says,
+    /// reading one video input per entry of `sizes`, at that size; an entry
+    /// of none is an input this instance does not read.
+    pub fn with_sizes(html: &str, geometry: Geometry, sizes: Vec<Option<(u32, u32)>>) -> Self {
         let place = geometry.placement();
         let (width, height) = (geometry.out_w, geometry.out_h);
         let renderer = VelloCpuImageRenderer::with_image_cache_config(
@@ -163,22 +182,33 @@ impl Compositor {
             ..Default::default()
         };
         let doc = HtmlDocument::from_html(html, config);
-        let (iw, ih) = (geometry.in_w, geometry.in_h);
-        let zeros = Arc::new(vec![0u8; (iw as usize) * (ih as usize) * 4]);
-        let placeholders: Vec<RasterImageData> = (0..inputs)
-            .map(|_| RasterImageData::new(iw, ih, zeros.clone()))
+        let mut zeros: Vec<((u32, u32), Arc<Vec<u8>>)> = Vec::new();
+        let placeholders: Vec<Option<RasterImageData>> = sizes
+            .iter()
+            .map(|size| {
+                let (w, h) = (*size)?;
+                let buffer = match zeros.iter().find(|(s, _)| *s == (w, h)) {
+                    Some((_, b)) => b.clone(),
+                    None => {
+                        let b = Arc::new(vec![0u8; (w as usize) * (h as usize) * 4]);
+                        zeros.push(((w, h), b.clone()));
+                        b
+                    }
+                };
+                Some(RasterImageData::new(w, h, buffer))
+            })
             .collect();
         let placeholder_ids = placeholders
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.data.id(), i as u32))
+            .filter_map(|(i, p)| Some((p.as_ref()?.data.id(), i as u32)))
             .collect();
         let mut c = Compositor {
             doc,
             renderer,
             geometry,
             place,
-            inputs,
+            sizes,
             placeholders,
             placeholder_ids,
             refs: Vec::new(),
@@ -326,32 +356,41 @@ impl Compositor {
     fn install_placeholders(&mut self) {
         for i in 0..self.refs.len() {
             let r = self.refs[i];
-            let p = self.placeholders.get(r.input as usize).cloned();
+            let p = self.placeholders.get(r.input as usize).cloned().flatten();
             self.set_image(r, p.as_ref());
         }
     }
 
     /// What the frame, as last resolved, needs: which inputs are drawn, and
-    /// whether it is input 0 untouched. Paints the document into a probe
+    /// whether it is one input untouched. The inputs set in `absent` have no
+    /// picture this frame and draw nothing. Paints the document into a probe
     /// that draws nothing; no pixels are needed.
-    pub fn plan(&mut self) -> Plan {
+    pub fn plan(&mut self, absent: u64) -> Plan {
         self.install_placeholders();
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
-        let mut probe = probe::Probe::new(&self.placeholder_ids, w, h);
+        let mut probe = probe::Probe::new(&self.placeholder_ids, absent, w, h);
         probe.reset();
         paint_placed(&mut probe, &mut self.doc, &place, w, h);
         Plan {
             drawn: probe.drawn,
-            bypass: probe.bypass(),
+            same: probe.same(),
         }
     }
 
+    /// Input `input`'s picture size, when this instance reads it.
+    pub fn size_of(&self, input: u32) -> Option<(u32, u32)> {
+        self.sizes.get(input as usize).copied().flatten()
+    }
+
     /// Hands every element showing input `input` a new picture (straight
-    /// RGBA8 at the frame's size). The elements' boxes do not change, so no
+    /// RGBA8 at the input's size). The elements' boxes do not change, so no
     /// damage is needed: paint reads the image data every frame.
     pub fn set_frame(&mut self, input: u32, rgba: Arc<Vec<u8>>) {
-        let image = RasterImageData::new(self.geometry.in_w, self.geometry.in_h, rgba);
+        let Some((w, h)) = self.size_of(input) else {
+            return;
+        };
+        let image = RasterImageData::new(w, h, rgba);
         for i in 0..self.refs.len() {
             let r = self.refs[i];
             if r.input == input {
@@ -364,6 +403,17 @@ impl Compositor {
     /// so the frames' buffers are released. Returns (paint_cmds_us,
     /// raster_us).
     pub fn paint(&mut self) -> (f64, f64) {
+        self.paint_without(0)
+    }
+
+    /// `paint`, with the inputs set in `absent` drawing nothing.
+    pub fn paint_without(&mut self, absent: u64) -> (f64, f64) {
+        for i in 0..self.refs.len() {
+            let r = self.refs[i];
+            if absent & bit(r.input) != 0 {
+                self.set_image(r, None);
+            }
+        }
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
         let doc = &mut self.doc;
@@ -385,7 +435,7 @@ impl Compositor {
 
     /// How many video inputs this instance reads.
     pub fn inputs(&self) -> u32 {
-        self.inputs
+        self.sizes.len() as u32
     }
 
     /// The border box of the first element matching `selector`, in CSS px:

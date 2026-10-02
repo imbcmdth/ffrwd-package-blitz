@@ -89,16 +89,16 @@ fn upstream_rows_without_select_are_somebody_elses() {
 }
 
 #[test]
-fn the_changes_parameter_takes_text_or_json() {
-    let p = Params::parse(r##"{"changes": "[{\"select\":\"#a\",\"text\":\"x\"}]"}"##).unwrap();
-    assert_eq!(p.changes.len(), 1);
+fn the_rows_parameter_takes_text_or_json() {
+    let p = Params::parse(r##"{"rows": "[{\"select\":\"#a\",\"text\":\"x\"}]"}"##).unwrap();
+    assert_eq!(p.rows.len(), 1);
     let p =
-        Params::parse(r##"{"changes": [{"select":"#a","text":"x"},{"select":"#b","text":"y"}]}"##)
+        Params::parse(r##"{"rows": [{"select":"#a","text":"x"},{"select":"#b","text":"y"}]}"##)
             .unwrap();
-    assert_eq!(p.changes.len(), 2);
-    let p = Params::parse(r##"{"changes": "{\"select\":\"#a\",\"text\":\"x\"}"}"##).unwrap();
-    assert_eq!(p.changes.len(), 1);
-    assert!(Params::parse(r##"{"changes": "[{\"select\":\"#a\"}]"}"##).is_err());
+    assert_eq!(p.rows.len(), 2);
+    let p = Params::parse(r##"{"rows": "{\"select\":\"#a\",\"text\":\"x\"}"}"##).unwrap();
+    assert_eq!(p.rows.len(), 1);
+    assert!(Params::parse(r##"{"rows": "[{\"select\":\"#a\"}]"}"##).is_err());
     assert!(Params::parse(r#"{"colour": "red"}"#).is_err());
     assert!(Params::parse(r#"{"fit": "cover"}"#).is_err());
     assert!(Params::parse(r#"{"css_width": 0}"#).is_err());

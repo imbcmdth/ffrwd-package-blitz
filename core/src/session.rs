@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use crate::changes::{Row, Source, Timed, Timeline};
 use crate::params::{Log, Params};
-use crate::{Compositor, Plan};
+use crate::{Compositor, Plan, bit};
 
 /// What one frame turns into.
 #[derive(Debug, PartialEq)]
 pub enum Output {
-    /// Input 0's bytes, which were never fetched.
-    Same,
+    /// This input's bytes, which were never fetched.
+    Same(u32),
     /// A new frame.
     New(Vec<u8>),
 }
@@ -45,8 +45,7 @@ struct Totals {
 pub struct Session {
     pub params: Params,
     out: (u32, u32),
-    input: (u32, u32),
-    inputs: u32,
+    sizes: Vec<Option<(u32, u32)>>,
     comp: Compositor,
     tl: Timeline,
     totals: Totals,
@@ -55,16 +54,21 @@ pub struct Session {
 
 impl Session {
     /// Builds the document and anchors its timeline at stream time 0, the
-    /// epoch every instance shares; rows from `changes` due by then are
-    /// applied there. `out` is the output frame's size and `input` the input
-    /// frames' (one size for every input).
+    /// epoch every instance shares; rows from the `rows` parameter due by
+    /// then are applied there. `out` is the output frame's size and `input`
+    /// the input frames' (one size for every input).
     pub fn new(params: Params, out: (u32, u32), input: (u32, u32), inputs: u32) -> Session {
-        let (comp, tl) = Session::build(&params, out, input, inputs, &[]);
+        Session::with_sizes(params, out, vec![Some(input); inputs as usize])
+    }
+
+    /// `new` with each input at a size of its own, `sizes` holding one entry
+    /// per input, none for an input this instance does not read.
+    pub fn with_sizes(params: Params, out: (u32, u32), sizes: Vec<Option<(u32, u32)>>) -> Session {
+        let (comp, tl) = Session::build(&params, out, &sizes, &[]);
         Session {
             params,
             out,
-            input,
-            inputs,
+            sizes,
             comp,
             tl,
             totals: Totals::default(),
@@ -83,12 +87,12 @@ impl Session {
         inputs: u32,
         log: &[Timed],
     ) -> Session {
-        let (comp, tl) = Session::build(&params, out, input, inputs, log);
+        let sizes = vec![Some(input); inputs as usize];
+        let (comp, tl) = Session::build(&params, out, &sizes, log);
         Session {
             params,
             out,
-            input,
-            inputs,
+            sizes,
             comp,
             tl,
             totals: Totals::default(),
@@ -99,14 +103,15 @@ impl Session {
     fn build(
         params: &Params,
         out: (u32, u32),
-        input: (u32, u32),
-        inputs: u32,
+        sizes: &[Option<(u32, u32)>],
         stream_log: &[Timed],
     ) -> (Compositor, Timeline) {
-        let mut comp = Compositor::new(&params.html, params.geometry(out, input), inputs);
+        let first = sizes.iter().flatten().next().copied().unwrap_or(out);
+        let geometry = params.geometry(out, first);
+        let mut comp = Compositor::with_sizes(&params.html, geometry, sizes.to_vec());
         let mut tl = Timeline::new();
         tl.start(&mut comp, 0.0);
-        tl.extend(params.changes.iter().cloned(), 0.0, Source::Param);
+        tl.extend(params.rows.iter().cloned(), 0.0, Source::Param);
         // Rows from the parameters come from `params`; the log adds the
         // ones that arrived with frames.
         for t in stream_log.iter().filter(|t| t.source == Source::Stream) {
@@ -123,10 +128,10 @@ impl Session {
         (comp, tl)
     }
 
-    /// New parameters. A new document, `changes` or `css_width` builds the
-    /// document again from the epoch: the new `changes`, then the rows that
-    /// arrived with frames since the last full-page replace, each at its own
-    /// time, up to where this instance had got.
+    /// New parameters. A new document, `rows` or `css_width` builds the
+    /// document again from the epoch: the new `rows`, then the rows that
+    /// arrived while it ran since the last full-page replace, each at its
+    /// own time, up to where this instance had got.
     pub fn set_params(&mut self, params: Params) {
         if !self.params.same_document(&params) {
             let now = self.tl.now();
@@ -138,8 +143,7 @@ impl Session {
                 .filter(|t| t.source == Source::Stream)
                 .cloned()
                 .collect();
-            let (mut comp, mut tl) =
-                Session::build(&params, self.out, self.input, self.inputs, &stream_log);
+            let (mut comp, mut tl) = Session::build(&params, self.out, &self.sizes, &stream_log);
             if now.is_finite() {
                 tl.advance(&mut comp, now);
             }
@@ -162,17 +166,16 @@ impl Session {
         std::mem::take(&mut self.tl.errors)
     }
 
-    /// Folds in the rows that arrived with a frame at `t` seconds: each line
-    /// is one change object or an array of them, and a line that is not a
-    /// change row is ignored. They take effect at their `at`, or at `t` when
-    /// they have none or an earlier one, and are applied when the frame
-    /// that reaches that time is rendered.
+    /// Folds in rows that arrived at `t` seconds: each line is one change
+    /// object or an array of them, and a line that is not a change row is
+    /// ignored. They take effect at their `at`, or at `t` when they have none
+    /// or an earlier one, and are applied when the frame that reaches that
+    /// time is rendered.
     ///
-    /// A call folds, in pts order, the rows of every frame it has to know
-    /// about and then renders: under ffrwd:av 0.18 that is its own frame's
-    /// rows; under a host that hands a worker the rows of the frames it
-    /// skipped, those first, each at its own frame's time. Either way every
-    /// row is applied at the same time on every instance.
+    /// An instance folds, in time order, the rows of every tick it has to
+    /// know about and then renders: those of the ticks another worker
+    /// rendered first, each at its own time, then its own tick's. Every row
+    /// is therefore applied at the same time on every instance.
     pub fn fold(&mut self, t: f64, lines: &[String]) -> usize {
         let mut n = 0;
         for line in lines {
@@ -184,15 +187,36 @@ impl Session {
         n
     }
 
+    /// Rows whose `at` is settled (an input's feed starting or ending), each
+    /// applied at its `at` and kept in the log as rows that arrived while the
+    /// instance ran are.
+    pub fn schedule(&mut self, rows: Vec<Row>) {
+        for row in rows {
+            let at = row.at.unwrap_or(f64::NEG_INFINITY);
+            self.tl.push(row, at, Source::Stream);
+        }
+    }
+
     /// One frame at `t` seconds: rows due by `t` are applied at their own
-    /// times, the document is resolved at `t`, and the frame is either input
-    /// 0 untouched (nothing fetched) or rendered from the inputs it draws,
-    /// each fetched once through `fetch`.
+    /// times, the document is resolved at `t`, and the frame is either one
+    /// input untouched (nothing fetched) or rendered from the inputs it
+    /// draws, each fetched once through `fetch`.
     pub fn frame(&mut self, t: f64, fetch: &mut dyn FnMut(u32) -> Vec<u8>) -> Output {
+        self.frame_without(t, 0, fetch)
+    }
+
+    /// `frame`, the inputs set in `absent` having no picture this frame:
+    /// they draw nothing and are not fetched.
+    pub fn frame_without(
+        &mut self,
+        t: f64,
+        absent: u64,
+        fetch: &mut dyn FnMut(u32) -> Vec<u8>,
+    ) -> Output {
         let start = Instant::now();
         let step = self.tl.advance(&mut self.comp, t);
         let s = Instant::now();
-        let plan: Plan = self.comp.plan();
+        let plan: Plan = self.comp.plan(absent);
         let plan_us = us(s);
         let mut st = FrameStats {
             rows: step.rows,
@@ -201,24 +225,31 @@ impl Session {
             plan_us,
             ..Default::default()
         };
-        let same_size = self.out == self.input;
-        let out = if self.params.bypass && plan.bypass && same_size {
-            st.bypassed = true;
-            Output::Same
-        } else {
-            let s = Instant::now();
-            let in_len = (self.input.0 as usize) * (self.input.1 as usize) * 4;
-            let len = (self.out.0 as usize) * (self.out.1 as usize) * 4;
-            for input in plan.inputs().filter(|i| *i < self.inputs) {
-                let bytes = fetch(input);
-                if bytes.len() == in_len {
-                    self.comp.set_frame(input, Arc::new(bytes));
-                    st.fetched += 1;
-                }
+        let whole = plan
+            .same
+            .filter(|i| self.comp.size_of(*i) == Some(self.out));
+        let out = match whole {
+            Some(input) if self.params.bypass => {
+                st.bypassed = true;
+                Output::Same(input)
             }
-            st.fetch_us = us(s);
-            (st.paint_cmds_us, st.raster_us) = self.comp.paint();
-            Output::New(std::mem::replace(&mut self.comp.out, vec![0u8; len]))
+            _ => {
+                let s = Instant::now();
+                let len = (self.out.0 as usize) * (self.out.1 as usize) * 4;
+                for input in plan.inputs().filter(|i| absent & bit(*i) == 0) {
+                    let Some((w, h)) = self.comp.size_of(input) else {
+                        continue;
+                    };
+                    let bytes = fetch(input);
+                    if bytes.len() == (w as usize) * (h as usize) * 4 {
+                        self.comp.set_frame(input, Arc::new(bytes));
+                        st.fetched += 1;
+                    }
+                }
+                st.fetch_us = us(s);
+                (st.paint_cmds_us, st.raster_us) = self.comp.paint_without(absent);
+                Output::New(std::mem::replace(&mut self.comp.out, vec![0u8; len]))
+            }
         };
         st.total_us = us(start);
         self.totals.frames += 1;

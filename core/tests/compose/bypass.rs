@@ -24,7 +24,7 @@ fn first(html: &str, inputs: u32) -> (Output, Vec<u32>) {
 #[test]
 fn the_video_alone_over_the_frame_is_handed_back_unfetched() {
     let (out, fetched) = first(&full("", ""), 1);
-    assert!(matches!(out, Output::Same));
+    assert!(matches!(out, Output::Same(0)));
     assert!(fetched.is_empty());
     // The default document is the same thing.
     let mut s = compose_core::Session::new(
@@ -37,7 +37,7 @@ fn the_video_alone_over_the_frame_is_handed_back_unfetched() {
         1,
     );
     let (out, fetched) = render(&mut s, W, H, 0.0, 0);
-    assert!(matches!(out, Output::Same) && fetched.is_empty());
+    assert!(matches!(out, Output::Same(0)) && fetched.is_empty());
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn what_cannot_show_does_not_stop_the_bypass() {
         ),
     ] {
         let (out, fetched) = first(&full(css, body), 1);
-        assert!(matches!(out, Output::Same), "{css} {body}");
+        assert!(matches!(out, Output::Same(0)), "{css} {body}");
         assert!(fetched.is_empty(), "{css}");
     }
 }
@@ -148,7 +148,7 @@ fn only_the_inputs_drawn_are_fetched() {
         two(&format!("img {{ {pos} }}"), r#"<img src="ffrwd:5">"#),
         Vec::<u32>::new()
     );
-    // Input 1 over the whole frame is not a bypass: `same` is input 0.
+    // Input 1 over the whole frame is handed back as itself.
     let (out, fetched) = first(
         &doc(
             "img { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; }",
@@ -156,8 +156,74 @@ fn only_the_inputs_drawn_are_fetched() {
         ),
         2,
     );
-    assert!(matches!(out, Output::New(_)));
-    assert_eq!(fetched, vec![1]);
+    assert!(matches!(out, Output::Same(1)));
+    assert!(fetched.is_empty());
+}
+
+#[test]
+fn the_last_input_drawn_whole_is_the_one_handed_back() {
+    let html = doc(
+        "img { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; }
+         #c.off { display: none; }",
+        r#"<img src="ffrwd:0"><img src="ffrwd:2"><img id="c" src="ffrwd:1">"#,
+    );
+    let (out, fetched) = first(&html, 3);
+    assert!(matches!(out, Output::Same(1)));
+    assert!(fetched.is_empty());
+    let mut s = session(&html, W, H, 3);
+    s.fold(0.0, &lines(&[r##"{"select": "#c", "change": "+off"}"##]));
+    let (out, _) = render(&mut s, W, H, 0.0, 0);
+    assert!(matches!(out, Output::Same(2)));
+}
+
+#[test]
+fn an_input_with_no_picture_draws_nothing_and_is_not_fetched() {
+    let html = doc(
+        "img { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; }",
+        r#"<img src="ffrwd:0"><img src="ffrwd:1">"#,
+    );
+    let mut s = session(&html, W, H, 2);
+    let mut fetched = Vec::new();
+    let out = s.frame_without(0.0, compose_core::bit(1), &mut |i| {
+        fetched.push(i);
+        picture(W, H, i, 0)
+    });
+    assert!(matches!(out, Output::Same(0)));
+    assert!(fetched.is_empty());
+    s.params.bypass = false;
+    let out = s.frame_without(0.1, compose_core::bit(1), &mut |i| {
+        fetched.push(i);
+        picture(W, H, i, 0)
+    });
+    assert_eq!(fetched, vec![0]);
+    assert_eq!(diff(&bytes(out), &picture(W, H, 0, 0)), (0, 0));
+}
+
+#[test]
+fn an_input_of_another_size_is_drawn_and_never_handed_back() {
+    let html = doc(
+        "img { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; }",
+        r#"<img src="ffrwd:0"><img src="ffrwd:1">"#,
+    );
+    let mut s = compose_core::Session::with_sizes(
+        params(&html),
+        (W, H),
+        vec![Some((W, H)), Some((W / 2, H / 2))],
+    );
+    let mut fetched = Vec::new();
+    let out = s.frame(0.0, &mut |i| {
+        fetched.push(i);
+        picture(W >> i, H >> i, i, 0)
+    });
+    assert_eq!(fetched, vec![0, 1]);
+    let f = bytes(out);
+    let small = picture(W / 2, H / 2, 1, 0);
+    let got = px(&f, W, 200, 100);
+    let want = px(&small, W / 2, 100, 50);
+    assert!(
+        got.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 8),
+        "{got:?} {want:?}"
+    );
 }
 
 #[test]
@@ -170,7 +236,7 @@ fn a_design_width_keeps_the_bypass() {
     p.css_width = Some(1280.0);
     let mut s = compose_core::Session::new(p, (1920, 1080), (1920, 1080), 1);
     let (out, fetched) = render(&mut s, 1920, 1080, 0.0, 0);
-    assert!(matches!(out, Output::Same));
+    assert!(matches!(out, Output::Same(0)));
     assert!(fetched.is_empty());
 }
 
@@ -213,7 +279,7 @@ fn a_background_image_of_the_video_alone_is_a_bypass() {
         r#"<div id="bg"></div>"#,
     );
     let (out, fetched) = first(&html, 1);
-    assert!(matches!(out, Output::Same));
+    assert!(matches!(out, Output::Same(0)));
     assert!(fetched.is_empty());
 }
 

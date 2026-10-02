@@ -1,28 +1,21 @@
 [workspace]
-# The four wasm modules this package ships, and the Rust under them.
-# `compose`, `compose1`, `compose2` and `compose3` build into
+# The wasm module this package ships, and the Rust under it. `compose` is a
+# node: its shape follows its params and the inputs a call binds, so one
+# module serves `compose` and `page`. It builds into
 # target/wasm32-wasip2/release/, which is where the package's lib SQL names
-# them. A module's describe cannot depend on its parameters, so each shape
-# (how many video inputs, whether it reads rows, whether it may run
-# frame-parallel) is a module of its own; each is a few lines over
-# `module`, the window-filter shim they share. `core` is the compositor
-# itself (Blitz, the change rows, the bypass decision), testable on the
-# native target.
+# it. `core` is the compositor itself (Blitz, the change rows, the bypass
+# decision, presence), testable on the native target.
 members = [
     "core",
-    "module",
     "compose",
-    "compose1",
-    "compose2",
-    "compose3",
-    # Test only: emits change rows, for the end-to-end test of rows that
-    # arrive with frames. The lib SQL does not name it.
+    # Test only: writes change rows, for the end-to-end test of rows from
+    # another node. The lib SQL does not name it.
     "tests/producer",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/imbcmdth/ffrwd-package-blitz"
@@ -46,7 +39,8 @@ data-url = "0.3.1"
 # The decoders `data:` images need, switched on in the `image` crate
 # blitz-dom already links.
 image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
-wit-bindgen = "0.57.1"
+serde = { version = "1", features = ["derive"] }
+ffrwd-node = { git = "https://github.com/imbcmdth/ffrwd-node", tag = "v0.1.0" }
 # The owner's rgba frame check.
 ffrwd-frame = { git = "https://github.com/imbcmdth/ffrwd-frame", rev = "de7db7834977ad93545f1af24345b297df2d670f" }
 

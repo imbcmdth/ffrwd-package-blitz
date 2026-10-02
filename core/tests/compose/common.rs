@@ -66,7 +66,7 @@ pub fn render(s: &mut Session, w: u32, h: u32, t: f64, n: usize) -> (Output, Vec
 pub fn bytes(out: Output) -> Vec<u8> {
     match out {
         Output::New(b) => b,
-        Output::Same => panic!("expected a rendered frame, got the bypass"),
+        Output::Same(_) => panic!("expected a rendered frame, got the bypass"),
     }
 }
 

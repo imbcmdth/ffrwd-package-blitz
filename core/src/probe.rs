@@ -1,14 +1,15 @@
 //! A paint target that draws nothing and answers two questions about the
 //! frame the document would paint: which video inputs appear in it, and
-//! whether the picture is exactly input 0, untouched.
+//! whether the picture is exactly one input, untouched.
 //!
 //! The compositor paints the document into this before it has any pixels:
 //! every video element holds a placeholder image whose blob id says which
 //! input it stands for. An input whose placeholder is never drawn inside the
-//! frame is never fetched. The frame is input 0 untouched (the bypass) when
-//! the last thing drawn that could show is input 0's image, drawn 1:1 over
-//! the whole frame, opaque, with no layer between it and the frame that
-//! could change it.
+//! frame is never fetched, and an input with no picture this frame draws
+//! nothing. The frame is an input untouched (the bypass) when the last
+//! thing drawn that could show is that input's image, drawn 1:1 over the
+//! whole frame, opaque, with no layer between it and the frame that could
+//! change it.
 //!
 //! It is conservative: anything it cannot prove invisible counts as
 //! visible, so a document it is unsure of is rendered rather than bypassed.
@@ -32,12 +33,14 @@ struct Layer {
 pub struct Probe<'a> {
     /// (blob id, input) of each placeholder.
     placeholders: &'a [(u64, u32)],
+    /// Bit `i` set: input `i` has no picture this frame.
+    absent: u64,
     frame: Rect,
     stack: Vec<Layer>,
     /// Bit `i` set: input `i` is drawn somewhere inside the frame.
     pub drawn: u64,
-    /// Input 0 covers the frame, 1:1 and opaque, as last drawn.
-    covered: bool,
+    /// The input covering the frame, 1:1 and opaque, as last drawn.
+    covered: Option<u32>,
     /// Something that could show was drawn after that cover.
     over: bool,
 }
@@ -45,20 +48,21 @@ pub struct Probe<'a> {
 const EPS: f64 = 1e-6;
 
 impl<'a> Probe<'a> {
-    pub fn new(placeholders: &'a [(u64, u32)], width: u32, height: u32) -> Self {
+    pub fn new(placeholders: &'a [(u64, u32)], absent: u64, width: u32, height: u32) -> Self {
         Probe {
             placeholders,
+            absent,
             frame: Rect::new(0.0, 0.0, width as f64, height as f64),
             stack: Vec::new(),
             drawn: 0,
-            covered: false,
+            covered: None,
             over: false,
         }
     }
 
-    /// Whether the frame is input 0's picture, untouched.
-    pub fn bypass(&self) -> bool {
-        self.covered && !self.over
+    /// The input the frame is, untouched.
+    pub fn same(&self) -> Option<u32> {
+        self.covered.filter(|_| !self.over)
     }
 
     fn hidden(&self) -> bool {
@@ -86,6 +90,15 @@ impl<'a> Probe<'a> {
             .iter()
             .find(|(b, _)| *b == id)
             .map(|(_, i)| *i)
+    }
+
+    /// The input `brush` shows, and whether it has no picture this frame.
+    fn input_of(&self, brush: &PaintRef<'_>) -> Option<(u32, bool)> {
+        let PaintRef::Image(img) = brush else {
+            return None;
+        };
+        let i = self.placeholder(img.image.data.id())?;
+        Some((i, self.absent & crate::bit(i) != 0))
     }
 
     /// Whether `shape` under `transform` covers the whole frame.
@@ -179,7 +192,7 @@ impl PaintScene for Probe<'_> {
     fn reset(&mut self) {
         self.stack.clear();
         self.drawn = 0;
-        self.covered = false;
+        self.covered = None;
         self.over = false;
     }
 
@@ -238,10 +251,10 @@ impl PaintScene for Probe<'_> {
         {
             return;
         }
-        if let PaintRef::Image(img) = &brush
-            && let Some(i) = self.placeholder(img.image.data.id())
-        {
-            self.drawn |= 1 << i.min(63);
+        match self.input_of(&brush) {
+            Some((_, true)) => return,
+            Some((i, false)) => self.drawn |= crate::bit(i),
+            None => {}
         }
         self.visible();
     }
@@ -260,23 +273,24 @@ impl PaintScene for Probe<'_> {
         let brush = brush.into();
         match &brush {
             PaintRef::Solid(c) if transparent(c) => return,
-            PaintRef::Image(img) => {
-                if let Some(i) = self.placeholder(img.image.data.id()) {
-                    self.drawn |= 1 << i.min(63);
+            PaintRef::Image(img) => match self.input_of(&brush) {
+                Some((_, true)) => return,
+                Some((i, false)) => {
+                    self.drawn |= crate::bit(i);
                     let whole = transform * brush_transform.unwrap_or(Affine::IDENTITY);
-                    if i == 0
-                        && !self.hidden()
+                    if !self.hidden()
                         && self.clear_path()
                         && is_identity(whole)
                         && img.sampler.alpha >= 1.0
                         && self.covers_frame(transform, shape)
                     {
-                        self.covered = true;
+                        self.covered = Some(i);
                         self.over = false;
                         return;
                     }
                 }
-            }
+                None => {}
+            },
             _ => {}
         }
         self.visible();

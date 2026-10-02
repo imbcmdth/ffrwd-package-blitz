@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-compose-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyrender",
  "anyrender_vello_cpu",
@@ -127,15 +127,6 @@ dependencies = [
  "parley",
  "peniko",
  "serde_json",
-]
-
-[[package]]
-name = "blitz-compose-module"
-version = "0.1.0"
-dependencies = [
- "blitz-compose-core",
- "ffrwd-frame",
- "wit-bindgen",
 ]
 
 [[package]]
@@ -322,30 +313,13 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "compose"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "blitz-compose-module",
-]
-
-[[package]]
-name = "compose1"
-version = "0.1.0"
-dependencies = [
- "blitz-compose-module",
-]
-
-[[package]]
-name = "compose2"
-version = "0.1.0"
-dependencies = [
- "blitz-compose-module",
-]
-
-[[package]]
-name = "compose3"
-version = "0.1.0"
-dependencies = [
- "blitz-compose-module",
+ "blitz-compose-core",
+ "ffrwd-frame",
+ "ffrwd-node",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -536,10 +510,11 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "emit-changes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "ffrwd-node",
+ "serde",
  "serde_json",
- "wit-bindgen",
 ]
 
 [[package]]
@@ -606,6 +581,16 @@ version = "0.1.0"
 source = "git+https://github.com/imbcmdth/ffrwd-frame?rev=de7db7834977ad93545f1af24345b297df2d670f#de7db7834977ad93545f1af24345b297df2d670f"
 dependencies = [
  "fast_image_resize",
+]
+
+[[package]]
+name = "ffrwd-node"
+version = "0.1.0"
+source = "git+https://github.com/imbcmdth/ffrwd-node?tag=v0.1.0#84216905037bae949623b6df22febc8fbbc50e17"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wit-bindgen",
 ]
 
 [[package]]

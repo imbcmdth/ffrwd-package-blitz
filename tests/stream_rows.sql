@@ -1,21 +1,20 @@
--- End to end: change rows that arrive with the frames. `emit_changes` (the
--- test module in tests/producer) passes the programme through and emits
--- the rows listed in `emit` beside it; `compose` reads them from its
--- `stream_changes` column. Build the modules first, then from the package
--- directory:
+-- End to end: change rows from another node. `emit_changes` (the test
+-- module in tests/producer) writes the rows listed in `emit` at their
+-- times; `compose` reads them on `changes`. Build the modules first, then
+-- from the package directory:
 --   ffrwd run -f tests/stream_rows.sql -v dest=stream_rows.mkv
 -- The lower third shows "From a stream" from 1.0 s (a row with no `at`,
--- taking the frame it arrives with), its box slides in at 1.5 s (a row that
--- arrives at 1.0 s scheduled for 1.5), and "Changed" replaces the text at
+-- taking the time it is written at), its box slides in at 1.5 s (a row
+-- written at 1.0 s scheduled for 1.5), and "Changed" replaces the text at
 -- 3.0 s (two rows in one array).
 CREATE FUNCTION emit_changes(v video_stream, emit text)
-RETURNS STRUCT(v video_stream,
-               changes STRUCT(at number, "select" text, change text, text text, html text)[])
+RETURNS STRUCT(at number, "select" text, change text, text text, html text)[]
   AS 'target/wasm32-wasip2/release/emit_changes.wasm', 'emit_changes' LANGUAGE wasm;
 
 COPY (
   SELECT ffrwd.blitz.compose(
-    emit_changes(s.video[1], emit => '[
+    s.video[1],
+    changes => emit_changes(s.video[1], emit => '[
       [1.0, {"select": "#lower", "text": "From a stream"}],
       [1.0, {"at": 1.5, "select": "#lower", "change": "+on"}],
       [3.0, [{"select": "#lower", "text": "Changed"}, {"select": "#lower", "change": "+alt"}]]

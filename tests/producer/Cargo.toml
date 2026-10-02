@@ -1,6 +1,6 @@
 [package]
 name = "emit-changes"
-description = "Test only: a window filter that emits change rows beside its frames, to drive `compose` from a stream"
+description = "Test only: a node that writes change rows at given times, to drive `compose` from another node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,5 +11,6 @@ name = "emit_changes"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen.workspace = true
+ffrwd-node.workspace = true
+serde.workspace = true
 serde_json.workspace = true

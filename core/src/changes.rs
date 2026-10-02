@@ -13,10 +13,9 @@
 //! `at` is seconds of stream time and is optional. A row takes effect at its
 //! `at` when that is at or after the time it arrives at, and at its arrival
 //! otherwise; a row without `at` takes effect at its arrival. A row arrives
-//! at the time of the frame it came with, and a row of the `changes`
-//! parameter at stream time 0. Every instance of a frame-parallel lane that
-//! is handed a row with the same arrival time therefore applies it at the
-//! same time.
+//! at its message's time, and a row of the `rows` parameter at stream time
+//! 0. Every instance of a frame-parallel lane that is handed a row with the
+//! same arrival time therefore applies it at the same time.
 //!
 //! The [`Timeline`] applies rows in replay mode: each group of rows with the
 //! same `at` is applied and the document resolved at that `at`, then the
@@ -61,8 +60,9 @@ pub struct Row {
     pub change: Change,
 }
 
-/// Where a row came from. Rows from the `changes` parameter are rebuilt from
-/// the parameter; rows that arrived with frames are kept in the log.
+/// Where a row came from. Rows from the `rows` parameter are rebuilt from
+/// the parameter; rows that arrived while the instance ran are kept in the
+/// log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Param,
