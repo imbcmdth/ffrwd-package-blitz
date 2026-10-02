@@ -15,7 +15,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/imbcmdth/ffrwd-package-blitz"
@@ -40,9 +40,9 @@ data-url = "0.3.1"
 # blitz-dom already links.
 image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
-ffrwd-node = { git = "https://github.com/imbcmdth/ffrwd-node", tag = "v0.1.0" }
+ffrwd-node = { git = "https://github.com/imbcmdth/ffrwd-node", tag = "v0.2.0" }
 # The owner's rgba frame check.
-ffrwd-frame = { git = "https://github.com/imbcmdth/ffrwd-frame", rev = "de7db7834977ad93545f1af24345b297df2d670f" }
+ffrwd-frame = { git = "https://github.com/imbcmdth/ffrwd-frame", tag = "v0.1.1" }
 
 [profile.release]
 opt-level = 3

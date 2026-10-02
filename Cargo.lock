@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-compose-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyrender",
  "anyrender_vello_cpu",
@@ -313,7 +313,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "compose"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blitz-compose-core",
  "ffrwd-frame",
@@ -510,7 +510,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "emit-changes"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ffrwd-node",
  "serde",
@@ -577,16 +577,16 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ffrwd-frame"
-version = "0.1.0"
-source = "git+https://github.com/imbcmdth/ffrwd-frame?rev=de7db7834977ad93545f1af24345b297df2d670f#de7db7834977ad93545f1af24345b297df2d670f"
+version = "0.1.1"
+source = "git+https://github.com/imbcmdth/ffrwd-frame?tag=v0.1.1#cf8887ce24bf5f5d570fed73b278f10ffee991f1"
 dependencies = [
  "fast_image_resize",
 ]
 
 [[package]]
 name = "ffrwd-node"
-version = "0.1.0"
-source = "git+https://github.com/imbcmdth/ffrwd-node?tag=v0.1.0#84216905037bae949623b6df22febc8fbbc50e17"
+version = "0.2.0"
+source = "git+https://github.com/imbcmdth/ffrwd-node?tag=v0.2.0#c497d710024b1dbed06db360a03e06d6c0fb0882"
 dependencies = [
  "serde",
  "serde_json",

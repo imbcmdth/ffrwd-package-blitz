@@ -1,12 +1,12 @@
 {
   "name": "ffrwd/blitz",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "An HTML/CSS video compositor: a static HTML document with the video inputs as images, driven over time by change rows, rendered by Blitz (Stylo, Taffy, Parley, Vello CPU) in the wasm sidecar.",
   "license": "MIT",
   "homepage": "https://github.com/imbcmdth/ffrwd-package-blitz",
   "capabilities": [],
   "dependencies": {
-    "ffrwd/wasm": "0.19.0"
+    "ffrwd/wasm": "0.19.1"
   },
   "keywords": [
     "html",

@@ -174,12 +174,12 @@ fdeflate 0.3.7
 fearless_simd 0.4.1
     Apache-2.0 OR MIT
     https://github.com/linebender/fearless_simd
-ffrwd-frame 0.1.0
+ffrwd-frame 0.1.1
     Apache-2.0
-    https://github.com/imbcmdth/ffrwd-frame?rev=de7db7834977ad93545f1af24345b297df2d670f
-ffrwd-node 0.1.0
+    https://github.com/imbcmdth/ffrwd-frame?tag=v0.1.1
+ffrwd-node 0.2.0
     MIT
-    https://github.com/imbcmdth/ffrwd-node?tag=v0.1.0
+    https://github.com/imbcmdth/ffrwd-node?tag=v0.2.0
 flate2 1.1.10
     MIT OR Apache-2.0
     https://github.com/rust-lang/flate2-rs
