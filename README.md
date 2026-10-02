@@ -30,7 +30,7 @@ ffrwd 0.29. The module is a node, built against `ffrwd:av@0.19.0`: 0.29 is
 the first release that hosts a node, holds one source onto another's clock
 and hands a node rows from any producer in the query. 0.28 and earlier do
 not load this package. The package needs no capabilities: no network, no
-files, no GPU. A call given a `port` is handed whatever connects there by
+files, no GPU. A held input fed by a port is handed whatever connects there by
 the host, which does the listening.
 
 ## A minimal query
@@ -135,9 +135,13 @@ the pairing before anything runs.
 The inputs need not come from one source: two files, or a page and a
 file, are held alike.
 
-Given `port => 9100` instead of streams, the call's one held input is
-whatever connects to 127.0.0.1:9100 and writes a NUT of raw video, shown
-over `v` while it is connected, as a switch feeder is.
+A run-time lateral's stream is a held input too, as it is a switch's
+feeder: `compose(prog.v, ad.video)` over `LATERAL ffrwd.vast.play(...)
+ad` gives the ad a loopback port, which each instance of the lateral
+writes to, and the ad is shown over `v` while one plays. The compiler
+writes that port into `port` and the call leaves `port` out. `port` is a
+list, one port per held input in `inputs` order, or a single port read
+as a list of one.
 
 ## Change rows
 
@@ -249,7 +253,7 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `css_width`, `css_height` | number | the canvas's | The design size, CSS px: the document's viewport. One side alone takes the canvas's aspect for the other. |
 | `fit` | text | `'contain'` | How the design fills the canvas: `'contain'` (uniform scale, centred, black bars) or `'stretch'` (each axis on its own). |
 | `bypass` | boolean | `true` | Hand an input back uncopied on frames that are nothing but it. |
-| `port` | number | none | `compose`: the loopback port the held input is given on. |
+| `port` | number, or a list of them | none | `compose`: the loopback ports the held inputs are given on, one each in `inputs` order; written by the compiler for laterals. |
 | `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
@@ -363,12 +367,13 @@ The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
      the page through an ffmpeg filter on its way, and end it with the
      programme: `ARRAY[ffmpeg.format(ad.video[1], 'rgba')]` and `WHERE
      ad.t < 12`, as `examples/lbar.sql` does.
-   - **One input by port.** `port` gives the call's one held input; a
-     second hot input is a second call, composing over the first. A
-     run-time lateral's stream (`ffrwd.vast.play`) cannot be a held input
-     yet: the compiler hands one only to an input that declares its port
-     before the call writes one, which this module does only when `port`
-     is given.
+   - **One lateral on `inputs`, and no port by hand.** The compiler hands
+     several laterals to one port list only when the schema's `type` is
+     `array` alone, and `port` also takes the single number the host
+     writes for held streams, so two ads are two calls for now. A port
+     written in the call (`port => 9100`) is refused when the sidecar
+     opens the module: the host reads a parameter whose schema allows two
+     types as text.
    - **A feed by port into an rgba programme is refused** by the host
      ("yuv in the "gbr" matrix is not converted here"), even one sending
      rgba: the host tags the rgba programme with a colour it then cannot

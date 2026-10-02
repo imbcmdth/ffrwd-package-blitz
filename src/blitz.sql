@@ -29,8 +29,9 @@
 -- `compose` renders the document once per frame of `v`, at that frame's
 -- time. `inputs` are held: each shows its newest frame at or before the
 -- tick and nothing while its feed is down, the way ffrwd/switch shows a
--- feeder. `port` gives the inputs as whatever connects to that loopback
--- port, when the call binds no stream there. `lead`, `linger` and
+-- feeder; a run-time lateral's stream there is fed on a loopback port of
+-- its own, which the compiler writes into `port` (a list in `inputs`
+-- order, or one port), so the call leaves it out. `lead`, `linger` and
 -- `timeout` are the held inputs' (a source tagged smart_timed=1 is on the
 -- clock's time and waits for it; any other starts `lead` seconds after
 -- `lead` seconds of it are held). `changes` takes rows from any producer

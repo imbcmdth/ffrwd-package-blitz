@@ -72,7 +72,15 @@ fn compose_is_clocked_by_its_picture_and_holds_the_rest() {
         (hold.lead, hold.linger, hold.timeout),
         (0.3, None, Some(1.0))
     );
-    assert_eq!(hold.port_param, None);
+    assert_eq!(hold.port_param.as_deref(), Some("port"));
+    let alone = shape("", &["v"]).unwrap();
+    let Pairing::Hold(hold) = &alone.find_input("inputs").unwrap().pairing else {
+        panic!("inputs are held")
+    };
+    assert_eq!(
+        hold.port_param, None,
+        "nothing bound and no port: no listener"
+    );
     let changes = s.find_input("changes").unwrap();
     assert!(changes.many && changes.rows == RowsUse::State);
     assert!(matches!(changes.pairing, Pairing::Interval(_)));
@@ -82,7 +90,7 @@ fn compose_is_clocked_by_its_picture_and_holds_the_rest() {
 
 #[test]
 fn a_size_given_is_the_output_s_and_a_port_holds_an_input_on_it() {
-    let s = shape(r#"{"width":1280,"height":720,"port":9100}"#, &["v"]).unwrap();
+    let s = shape(r#"{"width":1280,"height":720,"port":[9100]}"#, &["v"]).unwrap();
     assert!(matches!(
         s.find_output("video").unwrap().format,
         Some(Format::Video(VideoFormat {
@@ -95,6 +103,14 @@ fn a_size_given_is_the_output_s_and_a_port_holds_an_input_on_it() {
         panic!("inputs are held")
     };
     assert_eq!(hold.port_param.as_deref(), Some("port"));
+    let each = shape(r#"{"port":[9100,9101]}"#, &["v"]).unwrap();
+    let Pairing::Hold(hold) = &each.find_input("inputs").unwrap().pairing else {
+        panic!("inputs are held")
+    };
+    assert_eq!(hold.port_param.as_deref(), Some("port"));
+    assert!(shape(r#"{"port":[0]}"#, &["v"]).is_err());
+    assert!(shape(r#"{"port":9100}"#, &["v"]).is_ok());
+    assert!(shape(r#"{"port":"9100"}"#, &["v"]).is_err());
 }
 
 #[test]
