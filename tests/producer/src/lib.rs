@@ -39,7 +39,10 @@ fn parse(emit: &str) -> Result<Vec<(f64, String)>, String> {
             .and_then(Value::as_f64)
             .ok_or("each entry is [seconds, row]")?;
         let mut written = Vec::new();
-        rows(pair.get(1).ok_or("each entry is [seconds, row]")?, &mut written);
+        rows(
+            pair.get(1).ok_or("each entry is [seconds, row]")?,
+            &mut written,
+        );
         out.extend(written.into_iter().map(|row| (t, row)));
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));

@@ -17,7 +17,7 @@ use compose_core::params::{Log, Params as Document};
 use compose_core::presence::{self, Clock, Entry, Presence};
 use compose_core::{MAX_INPUTS, Output as Made, Session, bit};
 use ffrwd_node::{
-    Anchor, BoundStream, Bound, Init, Input, Node, Out, Output, Rational, Result, Shape, StateRow,
+    Anchor, Bound, BoundStream, Init, Input, Node, Out, Output, Rational, Result, Shape, StateRow,
     Tick,
 };
 use serde::Deserialize;
@@ -251,11 +251,7 @@ impl Node for Compose {
     }
 
     fn fold(&mut self, row: StateRow) -> Result<()> {
-        let base = self
-            .bases
-            .get(&row.id)
-            .copied()
-            .unwrap_or(Rational::MICROS);
+        let base = self.bases.get(&row.id).copied().unwrap_or(Rational::MICROS);
         self.session
             .fold(seconds_of(row.pts, base), &[row.json.to_owned()]);
         Ok(())
@@ -315,8 +311,7 @@ impl Node for Compose {
                     .zip(shown.get(k as usize - 1).cloned().flatten())
                     .map(|(id, frame)| (*id, frame.index)),
             };
-            let Some(((id, index), Some((w, h)))) =
-                found.zip(sizes.get(input as usize).copied())
+            let Some(((id, index), Some((w, h)))) = found.zip(sizes.get(input as usize).copied())
             else {
                 return Vec::new();
             };

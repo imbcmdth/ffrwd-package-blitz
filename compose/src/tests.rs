@@ -1,7 +1,7 @@
 use ffrwd_node::mock::Harness;
 use ffrwd_node::{
     Anchor, BoundStream, Clock as ClockKind, Feed, FeedStart, Format, Pairing, Payload, Rational,
-    Runner, RowsUse, VideoFormat,
+    RowsUse, Runner, VideoFormat,
 };
 
 use super::*;
@@ -26,7 +26,7 @@ fn params(html: &str, extra: &str) -> String {
 
 fn picture(mark: u8) -> Vec<u8> {
     let mut p = vec![255u8; (W * H * 4) as usize];
-    for (i, px) in p.chunks_exact_mut(4).enumerate() {
+    for (i, px) in p.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         px[0] = mark;
         px[1] = (i % 251) as u8;
     }
@@ -68,7 +68,10 @@ fn compose_is_clocked_by_its_picture_and_holds_the_rest() {
         panic!("inputs are held")
     };
     assert_eq!(hold.anchor, Anchor::Tagged("smart_timed".into()));
-    assert_eq!((hold.lead, hold.linger, hold.timeout), (0.3, None, Some(1.0)));
+    assert_eq!(
+        (hold.lead, hold.linger, hold.timeout),
+        (0.3, None, Some(1.0))
+    );
     assert_eq!(hold.port_param, None);
     let changes = s.find_input("changes").unwrap();
     assert!(changes.many && changes.rows == RowsUse::State);
@@ -124,7 +127,10 @@ fn whichever_input_is_drawn_whole_leaves_uncopied() {
     let mut node = Harness::<Compose>::new(&params(&html, ""), streams(1)).unwrap();
     let held = node.process(&node.tick(0).frame(0, 0, picture(1))).unwrap();
     assert_eq!(left(&held), Some(0), "input 1 has no frame yet");
-    let tick = node.tick(1).frame(0, 1, picture(1)).frame(10, 7, picture(2));
+    let tick = node
+        .tick(1)
+        .frame(0, 1, picture(1))
+        .frame(10, 7, picture(2));
     assert_eq!(left(&node.process(&tick).unwrap()), Some(10));
 }
 
@@ -149,15 +155,17 @@ fn rows_on_changes_are_state() {
     let mut node = Harness::<Compose>::new(&params(&html, ""), bound).unwrap();
     let quiet = node.process(&node.tick(0).frame(0, 0, picture(1))).unwrap();
     assert_eq!(left(&quiet), Some(0));
-    let tick = node
-        .tick(5)
-        .frame(0, 5, picture(1))
-        .earlier(20, 3, &[r##"{"select": "#b", "change": "+on"}"##]);
+    let tick = node.tick(5).frame(0, 5, picture(1)).earlier(
+        20,
+        3,
+        &[r##"{"select": "#b", "change": "+on"}"##],
+    );
     assert_eq!(left(&node.process(&tick).unwrap()), None);
-    let tick = node
-        .tick(6)
-        .frame(0, 6, picture(1))
-        .row(20, 6, &serde_json::json!({"select": "#b", "change": "-on"}));
+    let tick = node.tick(6).frame(0, 6, picture(1)).row(
+        20,
+        6,
+        &serde_json::json!({"select": "#b", "change": "-on"}),
+    );
     assert_eq!(left(&node.process(&tick).unwrap()), Some(0));
 }
 

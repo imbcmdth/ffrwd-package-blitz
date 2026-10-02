@@ -21,16 +21,17 @@ The four stills are from `examples/lbar.sql` at 1.0 s, 2.4 s, 5.0 s and
 8.9 s: the programme squeezes into the top right over 0.75 s to show an ad
 behind it, a lower third slides in with its name set by a change row, a
 pulsing logo starts when a row inserts it and stops when another removes
-it, and the programme grows back.
+it, and the programme grows back. The ad is a page of its own, rendered by
+the same module on its own clock.
 
 ## Requires
 
-ffrwd 0.27.6 or later. `compose2` and `compose3` declare a rows column
-beside several streams, which ffrwd 0.27.4 and 0.27.5 refuse, and a
-refused declaration stops the whole package loading: on those versions a
-query calling `compose` or `compose1` fails too. The modules are built
-against `ffrwd:av@0.18.0` (the `window-module` world). The package needs
-no capabilities: no network, no files, no GPU.
+ffrwd 0.29. The module is a node, built against `ffrwd:av@0.19.0`: 0.29 is
+the first release that hosts a node, holds one source onto another's clock
+and hands a node rows from any producer in the query. 0.28 and earlier do
+not load this package. The package needs no capabilities: no network, no
+files, no GPU. A call given a `port` is handed whatever connects there by
+the host, which does the listening.
 
 ## A minimal query
 
@@ -46,9 +47,9 @@ COPY (
                       #lower.on { opacity: 1; }
                     </style>
                     <img id="v" src="ffrwd:0"><div id="lower"></div>',
-           changes => '[{"at": 1.0, "select": "#lower", "text": "Jane Example"},
-                        {"at": 1.0, "select": "#lower", "change": "+on"},
-                        {"at": 3.0, "select": "#lower", "change": "-on"}]'),
+           rows => '[{"at": 1.0, "select": "#lower", "text": "Jane Example"},
+                     {"at": 1.0, "select": "#lower", "change": "+on"},
+                     {"at": 3.0, "select": "#lower", "change": "-on"}]'),
          f.audio[1]
   FROM input(:'source') f
 ) TO :'dest' WITH (video_codec 'libx264', pix_fmt 'yuv420p')
@@ -65,21 +66,21 @@ ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 
 ## Exports
 
-| export | video inputs | change rows from | workers |
+| export | reads | clock | output |
 |---|---|---|---|
-| `compose` | 1 | `changes`, and rows arriving with the frames | one |
-| `compose1` | 1 | `changes` | frame-parallel |
-| `compose2` | 2 | `changes`, and rows arriving with the first input's frames | one |
-| `compose3` | 3 | `changes`, and rows arriving with the first input's frames | one |
+| `compose` | `v`, any number of held `inputs`, rows on `changes` | `v`'s frames | one frame per frame of `v`, `v`'s size or `width` x `height` |
+| `page` | nothing | `fps` frames a second | `width` x `height`, a source read in FROM |
 
-A module's describe cannot depend on its parameters, so each shape is a
-module of its own. `compose`, `compose2` and `compose3` keep what rows
-arriving with frames did from one frame to the next, and a host spreading
-frames over workers hands each worker only its own frames' rows, so they
-run on one worker. In 0.1.0 every compose of two or three inputs runs on
-one worker, whether or not a stream sends it rows. `compose1` depends on
-its parameters alone, so the sidecar spreads it over its worker pool and
-the output is the same at any worker count.
+Both are one module. A node's ports follow its params and the inputs a
+call binds, so the module is clocked by `v` when the call binds it and by
+its own rate when it does not; `page` is the second declaration, with no
+`v`.
+
+Every row the document applies is folded as state, and a worker is handed
+the rows of the ticks it did not render, so `compose` and `page` spread
+over the sidecar's workers and the output is the same at any worker
+count. A call that gives `presence` runs on one worker, as the switch
+does: it learns when a feed starts and ends on the tick that happens.
 
 ## The document
 
@@ -94,35 +95,49 @@ ffrwd run -f query.sql -v html="$(cat page.html)" -v source=in.mp4 -v dest=out.m
 ```
 
 with `html => :'html'` in the query. Quotes in the document survive the
-variable.
+variable, and a long document reaches the sidecar in a file of its own.
 
 ### Video in the document
 
-- `<img src="ffrwd:N">` shows input N, counting the call's stream
-  arguments from 0. Each frame the element is handed the picture of input
-  N at that frame's pts. Give it a size in CSS; `object-fit` and
-  `object-position` work. An `<img>` with no CSS size is laid out at the
-  input's size in pixels, taken as CSS px.
+- `<img src="ffrwd:N">` shows input N: `v` is 0, and the streams on
+  `inputs` are 1 on, in the order the call names them. Each frame the
+  element is handed input N's picture for that frame. Give it a size in
+  CSS; `object-fit` and `object-position` work. An `<img>` with no CSS
+  size is laid out at the input's size in pixels, taken as CSS px.
 - `background-image: url(ffrwd:N)` works too, frame for frame, with
   `background-size`, `background-position` and `background-repeat`.
+- Each input keeps its own size; nothing is scaled to `v`'s before the
+  document places it.
 - An input whose element is not drawn in a frame (outside the frame,
   `display: none`, `opacity: 0`) is not copied into the module for that
-  frame.
-- When a frame is nothing but input 0, drawn 1:1 over the whole frame with
-  nothing visible over it, the module hands input 0 back without copying
-  it (`bypass`). It decides from the paint commands, before any pixels
+  frame. A held input with no picture at a frame (before its feed starts,
+  after it ends) draws nothing there.
+- When a frame is nothing but one input, drawn 1:1 over the whole frame
+  with nothing visible over it, the module hands that input back without
+  copying it (`bypass`): `v` while the document is idle, an ad while it
+  fills the screen. It decides from the paint commands, before any pixels
   arrive.
 
-### Fonts and images
+### Held inputs
 
-- DejaVu Sans is bundled and is every generic family (`sans-serif`,
-  `serif`, `monospace` and the rest) and the fallback for any family not
-  loaded. It is the regular face only: italic is slanted from it, and
-  bold draws as regular (see Limitations, 7).
-- `@font-face` with a `data:` URI works for TrueType, OpenType, WOFF and
-  WOFF2, with a format hint: see Limitations, 7.
-- Images come from `data:` URIs: PNG, JPEG, GIF (first frame), WebP and
-  SVG.
+`inputs` are paired with `v` the way the switch pairs a feeder: each shows
+its newest frame at or before the tick, the last one repeats while its
+source runs late, and frames are skipped when it catches up. A source
+tagged `smart_timed=1` is on `v`'s time and waits for it. Any other is
+shown from `lead` seconds after the host holds `lead` seconds of it, on
+`v`'s frames; `lead => 0` shows a stream of the query from the tick its
+first frame is at, which keeps it in step with `v` when both start
+together. `linger` keeps a source's last frame for that many seconds after
+it ends, and `timeout` gives up on one that stops sending (0 never does).
+`lead`, `linger` and `timeout` are fixed for a call, since the host plans
+the pairing before anything runs.
+
+The inputs need not come from one source: two files, or a page and a
+file, are held alike.
+
+Given `port => 9100` instead of streams, the call's one held input is
+whatever connects to 127.0.0.1:9100 and writes a NUT of raw video, shown
+over `v` while it is connected, as a switch feeder is.
 
 ## Change rows
 
@@ -141,7 +156,7 @@ variable.
   `html` it replaces the page.
 - `at` is seconds of stream time, the frame's time. It is optional.
 
-Where a row is expected, an array of rows is accepted too, so one frame
+Where a row is expected, an array of rows is accepted too, so one message
 can carry several changes:
 
 ```json
@@ -154,40 +169,27 @@ order of `at`; rows with the same `at` keep their arrival order.
 
 ### Where rows come from
 
-1. **The `changes` parameter**: JSON text holding one row, an array of
-   rows (whose elements may themselves be arrays), or one row or array per
-   line. Every export takes it.
-2. **Rows arriving with the frames** (`compose`, `compose2` and
-   `compose3`): an upstream module that emits rows beside its frames.
-   `compose` declares them as its `stream_changes` column, right after its
-   stream, so writing the producer's call inside `compose`'s passes both:
+1. **The `rows` parameter**: JSON text holding one row, an array of rows
+   (whose elements may themselves be arrays), or one row or array per
+   line. A malformed row is refused when the query is compiled.
+2. **The `changes` input**: rows from any producer in the query, a node
+   that writes rows or a data stream, several of them in an `ARRAY[...]`.
+   Writing the producer's call in `changes`' place passes its rows:
 
    ```pgsql
-   SELECT ffrwd.blitz.compose(my_cues(f.video[1]), html => ...)
+   SELECT ffrwd.blitz.compose(f.video[1], changes => my_cues(f.video[1]), html => ...)
    ```
 
-   `compose2` and `compose3` declare the column after their streams. The
-   rows are the ones arriving with the first stream's frames, so the
-   producer's call goes in the first position; rows on the second and
-   third streams never reach the module. This is what needs ffrwd 0.27.6:
-   earlier compilers refuse the column on a function reading several
-   streams.
-
-   ```pgsql
-   SELECT ffrwd.blitz.compose2(my_cues(p.v), p.v, html => ...)
-   ```
-
-   Rows apply as they do on `compose`: at their `at`, arrays accepted, a
-   later `at` scheduled, and kept in the log.
-
-   ffrwd matches the producer's record to the column field for field, so
-   the producer declares exactly `STRUCT(at number, "select" text, change
-   text, text text, html text)[]`. A row is a change row when it has
-   `select`; other rows are ignored. `tests/stream_rows.sql` does this with
-   a test module, and `tests/stream_rows2.sql` does it on `compose2`.
-3. **A live or data stream** (JSON messages from `ffrwd/vast`,
-   `ffrwd/ortb` or a run-time lateral): ffrwd 0.27.6 has no path from a
-   `data_stream` to a frame module. See Limitations, 9.
+   Each row arrives at its message's time, and the host hands a frame the
+   rows stamped up to it, waiting for each producer to get that far (at
+   most `latency` seconds, when that is given; a producer that says
+   nothing of its progress needs one). A row is read when it has `select`:
+   the producer's record needs that field, and others pass. Rows without
+   `select`, a deal track's for instance, are left alone.
+   `tests/stream_rows.sql` drives a document from a test node, and
+   `tests/stream_rows2.sql` does the same with a second picture held.
+3. **Presence**: rows the module makes when a held input's feed comes and
+   goes, below.
 
 ### Timing
 
@@ -195,8 +197,8 @@ order of `at`; rows with the same `at` keep their arrival order.
   resolves the document at `at`, then resolves at the frame's time. What
   it starts (a CSS animation, a transition) starts at `at`, whether or not
   a frame falls there.
-- A row without `at` takes effect at the time it arrives: the frame it
-  came with, or stream time 0 for the `changes` parameter.
+- A row without `at` takes effect at the time it arrives: its message's
+  time, or stream time 0 for the `rows` parameter.
 - An `at` later than the arrival schedules the change for then.
 - An `at` earlier than the arrival takes effect at the arrival: the style
   clock never runs backwards, so a change cannot be put in the past.
@@ -207,23 +209,55 @@ order of `at`; rows with the same `at` keep their arrival order.
   stream time 0, not at the first frame.
 - The module keeps a log of the rows applied since the last full-page
   `html` replace, each with the time it took effect. New parameters
-  (`set-params`) that change the document, `changes` or the sizes build
-  the document again and replay that log.
+  (`set-params`) that change the document, `rows` or the sizes build the
+  document again and replay that log.
+
+### Presence
+
+`presence` gives the document the rows `ffrwd/switch`'s `flex_input` sent
+at the edges of an insertion, made from what the host says of each held
+input's feed: when its first frame shows, and, once the source has ended,
+the last frame it shows. It is JSON text, one entry or an array, one entry
+per input:
+
+```pgsql
+presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
+               "coming": {"select": "#stage", "change": "~coming"},
+               "countdown": "#count", "lead_out": 0.2}]'
+```
+
+- `on` takes effect at the feed's first frame; `off`, `on` again when left
+  out (what a `~` toggle wants), `lead_out` seconds before `v` is shown
+  again, so a transition out ends as the feed's last frame leaves, or at
+  the frame the feed is seen to have gone when its end was not known
+  ahead.
+- A start known ahead of itself (a source held for `lead`, a timed one
+  waiting for its time) says `coming` at once and again at the start, so a
+  toggle is on for the wait, and gives the `countdown` element the whole
+  seconds left, one a second, each at its own time. A wait cut short says
+  `coming` where it was cut and nothing more.
+- Each message is a change object or an array of them, without `at`,
+  which the feed's times fill in.
 
 ## Parameters
 
 | parameter | type | default | |
 |---|---|---|---|
 | `html` | text | `''` | The document. `''` is input 0 over the frame. |
-| `changes` | text | `''` | Change rows as JSON. |
-| `width`, `height` | number | the output's | The canvas, px. |
+| `rows` | text | `''` | Change rows as JSON. |
+| `width`, `height` | number | `v`'s | The canvas, px. Both given, the output is that size. |
 | `css_width`, `css_height` | number | the canvas's | The design size, CSS px: the document's viewport. One side alone takes the canvas's aspect for the other. |
 | `fit` | text | `'contain'` | How the design fills the canvas: `'contain'` (uniform scale, centred, black bars) or `'stretch'` (each axis on its own). |
-| `bypass` | boolean | `true` | Hand input 0 back uncopied on frames that are nothing but it. |
-| `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). A frame-parallel lane opens an instance per worker. |
+| `bypass` | boolean | `true` | Hand an input back uncopied on frames that are nothing but it. |
+| `port` | number | none | `compose`: the loopback port the held input is given on. |
+| `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
+| `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
+| `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
+| `fps` | number | `30` | `page`: frames a second. |
+| `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |
 
-`compose`, `compose2` and `compose3` also take `stream_changes`, the rows
-column; the call fills it from the producer.
+`page` takes `html`, `width` and `height` (1280 and 720 by default),
+`fps`, `rows`, the design size, `fit` and `log`.
 
 ### Canvas, design size and output
 
@@ -231,30 +265,40 @@ column; the call fills it from the producer.
   By default CSS px are frame px. `css_width => 1280` lays a document out
   1280 CSS px wide and paints it at a device scale of frame width / 1280,
   so one document serves 720p (scale 1), 1080p (1.5) and 4K (3).
-- **Canvas**: the frame the document is composed for, in px, by default
-  the output's size. A design whose aspect differs from the canvas's is
-  fitted by `fit`.
-- **Output**: ffrwd's sidecar refuses an output frame of any size but the
-  first input's (every input arrives at that size too), so today the
-  output is always input 0's size, and a canvas of another shape is
-  fitted into it uniformly and centred, with black bars. A 1080x1920
-  canvas in a 1920x1080 output is pillarboxed. See Limitations, 9.
+- **Canvas**: the frame the document is composed for, in px. A design
+  whose aspect differs from the canvas's is fitted by `fit`.
+- **Output**: with `width` and `height` both given, the output is the
+  canvas, at that size, whatever size `v` is: a 1080x1920 output from a
+  1920x1080 programme is one call. Without them it is `v`'s size, and a
+  canvas given by one side alone is fitted into it uniformly and centred,
+  with black bars.
 
-The bypass needs the document 1:1 over the whole output, so it is off
-whenever the design is scaled into bars.
+The bypass needs an input 1:1 over the whole output, so it is off
+whenever the design is scaled into bars, and never hands back an input of
+another size than the output's.
 
 ## Performance
 
-One worker renders a 1280x720 document with a squeezing programme, a lower
-third and a logo well inside a 33 ms frame, and 1920x1080 with room to
-spare. 4K30 does not fit on one worker, and in 0.1.0 every compose of two
-or three inputs runs on one. Idle frames that are nothing but input 0 are
-handed back without rendering (`bypass`), and a change row costs a
-fraction of a millisecond on the frame it lands. Measured figures will
-come with a later release; the ones from the package's proof of concept
-predate ffrwd 0.28.0 and its native transport.
+Measured with the compositor spike's documents (an L-bar cycle designed
+at 1280x720 CSS px) over 60 s of lavfi testsrc2 at 30 fps, on one worker
+(`--jobs 1`), encoded with libx264 veryfast, on a 16-core Ryzen 9 9950X:
+the module's mean time a frame (rendered frames alone in brackets), and
+the whole run's frames a second.
 
-Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
+| document | 720p | 1080p |
+|---|---|---|
+| the video alone, rendered | 4.5 ms, 145 fps | 10.6 ms, 72 fps |
+| the video alone, handed back (`bypass`) | 0.13 ms, 249 fps | 0.18 ms, 115 fps |
+| L-bar cycle as CSS keyframes | 6.0 ms, 118 fps | 15.4 ms, 53 fps |
+| the same, idle frames handed back | 2.9 ms (6.7), 167 fps | 7.5 ms (18.0), 75 fps |
+| L-bar cycle as transitions cued by rows | 2.7 ms (6.6), 169 fps | 7.3 ms (18.0), 68 fps |
+
+One worker renders 1080p30 with room to spare, and a change row costs a
+fraction of a millisecond on the frame it lands. 4K30 does not fit on
+one; `compose` and `page` spread over the sidecar's workers, except a
+call with `presence`.
+
+The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
 
 ## Limitations and workarounds
 
@@ -290,99 +334,83 @@ Each module is about 11.3 MB (3.7 MB gzipped), most of it Stylo.
    `format(opentype)`, `format(woff)`, `format(woff2)`, `format("ttf")`,
    `format("otf")` or `format("woff2")`. With no hint, or with
    `format("truetype")` or `format("woff")`, the font is skipped and the
-   text falls back to DejaVu Sans. A whole font is too big for the
-   parameters on Windows (see below), so subset it to the glyphs the page
-   uses.
-8. **Frame-parallel only on `compose1`.** `compose`, `compose2` and
-   `compose3` read rows arriving with frames, so they run on one worker,
-   and in 0.1.0 that holds for a two- or three-input compose driven by
-   `changes` alone too. One worker is enough for 1080p30 and not for 4K30. A host that hands each worker the rows of the frames
-   it skipped (planned for a later `ffrwd:av` world) lets all three run
-   frame-parallel; the modules already apply such rows at their own
-   times.
+   text falls back to DejaVu Sans. Subset a font to the glyphs the page
+   uses: a font is a `data:` URI, and those are slow (5).
+8. **Presence runs on one worker.** The host says on every tick when a
+   feed's first frame shows and, once known, its last, but not when the
+   start became known nor when a feed it could not foretell the end of
+   went. A worker that did not render that tick would time `coming` and
+   such an `off` differently, so a call with `presence` runs on one
+   worker, as the switch does. One worker is enough for 1080p30 and not
+   for 4K30.
 9. **Also:**
    - **The root element's background image does not fill the page**; only
      its colour does. Give `html, body { height: 100% }`, or put the
      background on a full-size element.
    - **A page that paints no background is transparent**, which encodes as
      black. Where the page is translucent the output is premultiplied.
-   - **The output is input 0's size.** The sidecar refuses any other; see
-     Canvas above. The smallest change that would lift it: let a window
-     filter answer its output format from `init` (or an optional interface
-     beside `window-filter`), have the sidecar write that size in its
-     output header and check frames against it, and let the compiler
-     treat the module's output size as unknown downstream.
-   - **Several inputs must come from one point.** ffrwd runs a module
-     reading several streams only when each reaches it from the same
-     source through modules that emit one frame per frame in (`split`
-     counts, an ffmpeg filter does not). Two separate files, or two lavfi
-     sources, are refused ("do not run in lockstep"). The example's ad
-     input is therefore a second `compose1` rendering an HTML page on the
-     programme's clock. An ad from `ffrwd/vast` arrives as a run-time
-     lateral whose streams go only to feeders, which these modules do not
-     have yet.
-   - **A stream that also goes somewhere outside the sidecar** (an
-     encoder, a data filter's clock) and feeds two of these inputs reaches
-     the sidecar on two pipes, which ffrwd refuses ("reads 2 streams and
-     hosts no packet sink or filter"). Pass it through `compose1` first,
-     `WITH p AS (SELECT ffrwd.blitz.compose1(s.video[1]) AS v FROM ...)`,
-     so it enters on one pipe and is split inside the sidecar. With the
-     default document `compose1` hands every frame back uncopied. A stream
-     read only by these modules needs no such pass, as in the example.
-   - **No data streams.** A `data_stream` cannot reach a frame module in
-     ffrwd 0.27.6: a stream parameter must be video or audio, a feeder's
-     kind must be `video` or `audio`, and a run-time lateral's streams go
-     only to feeders. The smallest addition is a `data` feeder kind: the
-     compiler accepts a `data_stream` in a feeder position and writes the
-     stream as NUT to the loopback port it already allocates; the WIT
-     needs only its comment changed (`kind` is a string). The module would
-     read the messages over that connection (the `tcp` capability, as
-     `ffrwd/switch` reads its feeders) and fold each message as change
-     rows at its pts.
-   - **Parameters travel on the sidecar's command line**, so the document,
-     the rows and any `data:` URIs of every module in one sidecar together
-     must fit in Windows' 32,767-character command line (Linux allows
-     128 KiB per argument). The sidecar reads `-params-from <file>`, which
-     ffrwd's compiler does not use yet.
-   - **`compose2` and `compose3` take rows from their first stream
-     only**, and need ffrwd 0.27.6 for it. ffrwd 0.27.4 and 0.27.5 refuse
-     an annotation column on a function reading several streams, and they
-     read every declaration of a package before running any of it, so on
-     them no export of this package loads (see Requires).
+   - **The bypass takes every input as opaque**, as decoded video is. An
+     input with transparency drawn alone over the whole frame is handed
+     back with its own alpha rather than over what the page has under it;
+     give such a call `bypass => false`.
+   - **One stream cannot be both `v` and a held input.** The host refuses a
+     stream bound to two ports of one node ("stream id 0 is bound twice").
+     Pass the second through a filter, `ARRAY[ffmpeg.format(s.video[1],
+     'rgba')]`, as `tests/stream_rows2.sql` does.
+   - **A `page` held by a `compose` in the same sidecar is not held back.**
+     The host lets a source node render as far ahead of the input holding
+     it as memory allows, and a run can stall or run out of memory. Pass
+     the page through an ffmpeg filter on its way, and end it with the
+     programme: `ARRAY[ffmpeg.format(ad.video[1], 'rgba')]` and `WHERE
+     ad.t < 12`, as `examples/lbar.sql` does.
+   - **One input by port.** `port` gives the call's one held input; a
+     second hot input is a second call, composing over the first. A
+     run-time lateral's stream (`ffrwd.vast.play`) cannot be a held input
+     yet: the compiler hands one only to an input that declares its port
+     before the call writes one, which this module does only when `port`
+     is given.
+   - **A feed by port into an rgba programme is refused** by the host
+     ("yuv in the "gbr" matrix is not converted here"), even one sending
+     rgba: the host tags the rgba programme with a colour it then cannot
+     convert to. Held streams from the query are unaffected.
    - **Short animations cost extra resolves.** Blitz moves a CSS animation
      on by at most one iteration per resolve, so when frames are further
-     apart than half the shortest animation (a frame-parallel worker, or
-     one opened late), the module resolves at steps in between before
-     rendering. With 30 fps and a few workers this is rare; a 0.1 s loop
-     on 16 workers adds about ten resolves (0.05 to 0.2 ms each) a frame.
+     apart than half the shortest animation (a worker that renders every
+     few frames, or one opened late), the module resolves at steps in
+     between before rendering. With 30 fps and a few workers this is rare;
+     a 0.1 s loop on 16 workers adds about ten resolves (0.05 to 0.2 ms
+     each) a frame.
 
 ## Building and testing
 
 ```
-ffrwd install
 cargo build --target wasm32-wasip2 --release
-cargo test -p blitz-compose-core
+cargo test -p blitz-compose-core -p compose
 ```
 
-`ffrwd install` fetches the `ffrwd/wasm` package, whose `wit/av.wit` the
-module's `build.rs` reads (`FFRWD_WIT_DIR` names another). The build takes
-about 9 minutes from clean (full LTO, four modules). `ffrwd-wasm --describe
-target/wasm32-wasip2/release/compose.wasm` prints what a module declares.
+The module is a node on [ffrwd-node](https://github.com/imbcmdth/ffrwd-node),
+which carries the `ffrwd:av` world, so nothing is installed before
+building. The build takes about 5 minutes from clean (full LTO).
+`ffrwd-wasm --describe target/wasm32-wasip2/release/compose.wasm` prints
+what the module declares, and `ffrwd-wasm --shape` its ports for a call's
+params and bound inputs.
 
-The native tests (`core/tests/compose`) cover row parsing and ordering,
-replay timing (an animation and a transition inserted at 3.01 s start at
-3.01 s), late joiners, frame-parallel workers with and without the rows of
-skipped frames, rows on two and three inputs, the bypass and which inputs
-are fetched, the design scale at 720p, 1080p and 4K, 16:9, 9:16 and square
-canvases, whole-pixel versus transform motion, fonts and images. They take
-under a second once built.
-`tests/stream_rows.sql` runs change rows from a stream through the sidecar,
-and `tests/stream_rows2.sql` does the same on the first input of `compose2`
-(ffrwd 0.27.6).
+The native tests (`core/tests/compose`, `core/src/presence.rs` and
+`compose/src/tests.rs`) cover row parsing and ordering, replay timing (an
+animation and a transition inserted at 3.01 s start at 3.01 s), late
+joiners, frame-parallel workers with and without the rows of skipped
+frames, rows with several inputs, the bypass of whichever input is drawn
+whole, inputs with no picture and of other sizes, which inputs are
+fetched, presence from feeds starting, ending and cut short, the shapes
+of `compose` and `page`, the design scale at 720p, 1080p and 4K, 16:9,
+9:16 and square canvases, whole-pixel versus transform motion, fonts and
+images. They take a few seconds once built.
+`tests/stream_rows.sql` runs change rows from another node through the
+sidecar, and `tests/stream_rows2.sql` does it with a second picture held.
 
 ## License
 
-MIT; see `LICENSE`. The built modules include third-party code under its
+MIT; see `LICENSE`. The built module includes third-party code under its
 own licenses: Stylo (MPL-2.0), Blitz, Vello, Parley, Taffy and the other
 crates listed in `THIRD_PARTY_NOTICES`, and the DejaVu Sans font
 (Bitstream Vera license, DejaVu changes in the public domain, Arev glyphs

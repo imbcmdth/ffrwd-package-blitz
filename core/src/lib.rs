@@ -182,20 +182,15 @@ impl Compositor {
             ..Default::default()
         };
         let doc = HtmlDocument::from_html(html, config);
-        let mut zeros: Vec<((u32, u32), Arc<Vec<u8>>)> = Vec::new();
+        let mut zeros = std::collections::HashMap::new();
         let placeholders: Vec<Option<RasterImageData>> = sizes
             .iter()
             .map(|size| {
                 let (w, h) = (*size)?;
-                let buffer = match zeros.iter().find(|(s, _)| *s == (w, h)) {
-                    Some((_, b)) => b.clone(),
-                    None => {
-                        let b = Arc::new(vec![0u8; (w as usize) * (h as usize) * 4]);
-                        zeros.push(((w, h), b.clone()));
-                        b
-                    }
-                };
-                Some(RasterImageData::new(w, h, buffer))
+                let buffer: &Arc<Vec<u8>> = zeros
+                    .entry((w, h))
+                    .or_insert_with(|| Arc::new(vec![0u8; (w as usize) * (h as usize) * 4]));
+                Some(RasterImageData::new(w, h, buffer.clone()))
             })
             .collect();
         let placeholder_ids = placeholders

@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Blitz and Stylo, four modules, full LTO.
+    # Blitz and Stylo, full LTO.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -17,19 +17,18 @@ jobs:
           targets: wasm32-wasip2
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install ffrwd and the wit package
-        run: |
-          pip install ffrwd ffrwd-wasm
-          ffrwd install
-      - name: Build the modules
+      - name: Install ffrwd
+        run: pip install ffrwd ffrwd-wasm
+      - name: Build the module
         run: cargo build --target wasm32-wasip2 --release
-      - name: Describe the modules
+      - name: Describe the module and its shapes
         run: |
-          for module in compose compose1 compose2 compose3; do
-            ffrwd-wasm --describe "target/wasm32-wasip2/release/$module.wasm"
-          done
+          module=target/wasm32-wasip2/release/compose.wasm
+          ffrwd-wasm --describe "$module"
+          ffrwd-wasm --shape "$module" --bound v,inputs,changes
+          ffrwd-wasm --shape "$module" --params '{"width":1280,"height":720}'
       - name: Unit tests
-        run: cargo test -p blitz-compose-core
+        run: cargo test -p blitz-compose-core -p compose
       - name: Formatting
         run: cargo fmt --all --check
       - name: Lints

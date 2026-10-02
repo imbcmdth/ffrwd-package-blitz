@@ -60,7 +60,9 @@ impl Entry {
 
     fn from_value(value: &Value) -> Result<Entry, String> {
         let Value::Object(fields) = value else {
-            return Err(format!("presence: an entry is an object, and {value} is not"));
+            return Err(format!(
+                "presence: an entry is an object, and {value} is not"
+            ));
         };
         for key in fields.keys() {
             if !["input", "on", "off", "coming", "countdown", "lead_out"].contains(&key.as_str()) {

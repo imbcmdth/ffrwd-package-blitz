@@ -9,14 +9,16 @@
 -- source with no inputs that runs on its own clock. The compositor holds
 -- the ad onto the programme's clock as the switch holds a feeder;
 -- `lead => 0` shows it from the tick its first frame is at, so the two
--- keep step from the start.
+-- keep step from the start. The ad passes through an ffmpeg `format` on
+-- its way, and `WHERE ad.t < 12` ends it with the programme: see the
+-- README's limitations.
 --
 -- variables: dest (output path)
 -- example: ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 COPY (
   SELECT ffrwd.blitz.compose(
     p.video[1],
-    ARRAY[ad.video[1]],
+    ARRAY[ffmpeg.format(ad.video[1], 'rgba')],
     html => '<!DOCTYPE html><html><head><style>
       html, body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
       #ad, #prog { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; }
@@ -64,4 +66,5 @@ COPY (
          </style></head><body><div id="t">BIG SALE</div>
          <div id="s">This weekend only, at your local store</div><div id="ball"></div></body></html>',
          width => 1920, height => 1080, css_width => 1280) ad
+  WHERE ad.t < 12
 ) TO :'dest' WITH (video_codec 'libx264', preset 'veryfast', crf 18, pix_fmt 'yuv420p')

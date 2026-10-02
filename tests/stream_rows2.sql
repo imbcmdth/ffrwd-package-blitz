@@ -16,7 +16,7 @@ RETURNS STRUCT(at number, "select" text, change text, text text, html text)[]
 COPY (
   SELECT ffrwd.blitz.compose(
     s.video[1],
-    ARRAY[s.video[1]],
+    ARRAY[ffmpeg.format(s.video[1], 'rgba')],
     emit_changes(s.video[1], emit => '[
       [1.0, {"select": "#lower", "text": "From a stream"}],
       [1.0, {"at": 1.5, "select": "#lower", "change": "+on"}],

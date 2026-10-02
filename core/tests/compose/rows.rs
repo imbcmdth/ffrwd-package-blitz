@@ -92,9 +92,8 @@ fn upstream_rows_without_select_are_somebody_elses() {
 fn the_rows_parameter_takes_text_or_json() {
     let p = Params::parse(r##"{"rows": "[{\"select\":\"#a\",\"text\":\"x\"}]"}"##).unwrap();
     assert_eq!(p.rows.len(), 1);
-    let p =
-        Params::parse(r##"{"rows": [{"select":"#a","text":"x"},{"select":"#b","text":"y"}]}"##)
-            .unwrap();
+    let p = Params::parse(r##"{"rows": [{"select":"#a","text":"x"},{"select":"#b","text":"y"}]}"##)
+        .unwrap();
     assert_eq!(p.rows.len(), 2);
     let p = Params::parse(r##"{"rows": "{\"select\":\"#a\",\"text\":\"x\"}"}"##).unwrap();
     assert_eq!(p.rows.len(), 1);
