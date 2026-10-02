@@ -37,9 +37,9 @@
 -- `lead` seconds of it are held). `changes` takes rows from any producer
 -- in the query, paired by time and folded as state, waiting for each
 -- producer at most `latency` seconds when that is given. `presence` makes
--- rows from the held inputs' feeds coming and going (see the README); a
--- call that gives it runs on one worker, and one that does not may run on
--- several.
+-- rows from the held inputs' feeds coming and going (see the README), out
+-- of the host's record of each feed, so every call may run on several
+-- workers.
 CREATE FUNCTION compose(v video_stream,
                         inputs video_stream[] DEFAULT NULL,
                         changes STRUCT(at number, "select" text, change text,

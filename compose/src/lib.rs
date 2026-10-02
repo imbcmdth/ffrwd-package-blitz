@@ -6,15 +6,15 @@
 //! frame at the tick and nothing while its feed is down; one given by a
 //! port is whatever connects there. `v` is `ffrwd:0` in the document and
 //! the held inputs `ffrwd:1` on, in the order the call names them. Rows on
-//! `changes` are folded as state, so a call without `presence` is pure and
-//! a host spreads it over workers, each folding the rows of the ticks the
-//! others rendered.
+//! `changes` are folded as state and presence rows come from the host's
+//! record of each feed, so a call is pure and a host spreads it over
+//! workers, each folding the rows of the ticks the others rendered.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use compose_core::params::{Log, Params as Document};
-use compose_core::presence::{self, Clock, Entry, Presence};
+use compose_core::presence::{self, Clock, Entry, Presence, Seen};
 use compose_core::{MAX_INPUTS, Output as Made, Session, bit};
 use ffrwd_node::{
     Anchor, Bound, BoundStream, Init, Input, Node, Out, Output, Rational, Result, Shape, StateRow,
@@ -81,7 +81,8 @@ pub struct Compose {
     presence: Presence,
     /// The stream each presence entry watches.
     watched: Vec<u32>,
-    last_pts: Option<i64>,
+    /// One frame of the clock, in its pts, where a frame does not say.
+    step: Option<i64>,
 }
 
 fn watched(entries: &[Entry], held: &[u32]) -> Result<Vec<u32>, String> {
@@ -110,7 +111,7 @@ impl Node for Compose {
 
     fn shape(params: &Params, bound: &Bound) -> Result<Shape> {
         let doc = params.document()?;
-        let entries = Entry::parse_list(&params.presence)?;
+        Entry::parse_list(&params.presence)?;
         let clocked = bound.has("v");
         let mut held = Input::video("inputs")
             .optional()
@@ -163,10 +164,7 @@ impl Node for Compose {
                 .bounded(false);
         }
         shape = shape.input(held).input(changes);
-        if entries.is_empty() {
-            shape = shape.pure();
-        }
-        Ok(shape)
+        Ok(shape.pure())
     }
 
     fn init(params: Params, init: &Init) -> Result<Compose> {
@@ -208,6 +206,14 @@ impl Node for Compose {
             .iter()
             .map(|s| (s.id, s.info.time_base))
             .collect();
+        let step = match v {
+            Some(v) => v
+                .hint
+                .rate
+                .map(|rate| v.info.time_base.pts(rate.duration(1))),
+            None => Some(1),
+        }
+        .filter(|step| *step > 0);
         let summary = doc.log != Log::Off;
         let started = Instant::now();
         let mut session = Session::with_sizes(doc, out, sizes.clone());
@@ -239,7 +245,7 @@ impl Node for Compose {
             session,
             presence: Presence::new(entries),
             watched,
-            last_pts: None,
+            step,
         })
     }
 
@@ -274,28 +280,28 @@ impl Node for Compose {
         };
         let t = seconds_of(pts, clock);
         if !self.watched.is_empty() {
-            let step = duration
-                .or(self.last_pts.map(|last| pts - last))
-                .filter(|d| *d > 0);
-            let feeds: Vec<Option<presence::Feed>> = self
+            let step = duration.filter(|d| *d > 0).or(self.step);
+            let record = |f: ffrwd_node::Feed| presence::Feed {
+                known: f.start.known,
+                at: f.start.at,
+                first_pts: f.start.first_pts,
+                ends: f.ends,
+            };
+            let seen: Vec<Seen> = self
                 .watched
                 .iter()
-                .map(|id| {
-                    tick.feed(*id).map(|f| presence::Feed {
-                        at: f.start.at,
-                        first_pts: f.start.first_pts,
-                        ends: f.ends,
-                    })
+                .map(|id| Seen {
+                    current: tick.feed(*id).map(record),
+                    ended: tick.ended_feeds(*id).into_iter().map(record).collect(),
                 })
                 .collect();
             let clock = Clock {
                 num: clock.num,
                 den: clock.den,
             };
-            let rows = self.presence.tick(pts, step, clock, &feeds);
+            let rows = self.presence.tick(pts, step, clock, &seen);
             self.session.schedule(rows);
         }
-        self.last_pts = Some(pts);
 
         let shown: Vec<_> = self.held.iter().map(|id| tick.frame(*id)).collect();
         let mut absent = if clocked.is_some() { 0 } else { bit(0) };

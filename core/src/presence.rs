@@ -1,16 +1,18 @@
 //! Presence: the change rows a document is given at the edges of a held
 //! input's feed, so it can move with an input that comes and goes.
 //!
-//! The host says, on every tick, what a held input's feed is: the clock time
-//! its first frame shows at, and, once it can tell, the last tick it shows
-//! on. From that this makes the rows `flex_input` used to send. `on` takes
-//! effect when the feed's first frame shows, `off` (by default `on` again,
-//! which is what a `~` toggle wants) `lead_out` seconds before the clock's
-//! own picture is back, or as the feed is seen to have ended when that was
-//! not foretold. A start known ahead of itself says `coming` at once and
-//! again at the start, and gives the `countdown` element the whole seconds
-//! left, one a second, each at its own time. A wait cut short says `coming`
-//! where it was cut and nothing more.
+//! The host records each feed: the tick its start was fixed on, the clock
+//! time its first frame shows at and, once it can tell, the last tick it
+//! shows on; and it lists, on each call, the feeds that ended since the
+//! instance's previous one. From that record alone this makes the rows
+//! `flex_input` used to send, so they come out the same on any worker. `on`
+//! takes effect when the feed's first frame shows, `off` (by default `on`
+//! again, which is what a `~` toggle wants) `lead_out` seconds before the
+//! clock's own picture is back, or on that picture when the end was not
+//! told ahead. A start known ahead of itself says `coming` on the tick it
+//! was fixed and again at the start, and gives the `countdown` element the
+//! whole seconds left, one a second, each at its own time. A wait cut short
+//! says `coming` where it was cut and nothing more.
 
 use serde_json::Value;
 
@@ -120,15 +122,32 @@ impl Entry {
     }
 }
 
-/// A held input's feed as one tick sees it, in the clock's pts.
+/// A held input's feed as the host records it, in the clock's pts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Feed {
+    /// The tick its start was fixed on.
+    pub known: i64,
     /// The clock time its first frame shows at.
     pub at: i64,
-    /// Its source's first pts, which with `at` tells one feed from the next.
+    /// Its source's first pts, which with `known` and `at` tells one feed
+    /// from the next.
     pub first_pts: i64,
     /// The last tick it shows on, once the host can tell.
     pub ends: Option<i64>,
+}
+
+impl Feed {
+    fn key(&self) -> (i64, i64, i64) {
+        (self.known, self.at, self.first_pts)
+    }
+}
+
+/// What one tick says of one held input: its current feed, and the feeds
+/// that ended since the instance's previous call, oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    pub current: Option<Feed>,
+    pub ended: Vec<Feed>,
 }
 
 /// The clock's time base.
@@ -166,20 +185,29 @@ impl Clock {
     }
 }
 
+type Key = (i64, i64, i64);
+
 #[derive(Clone, Copy, Debug)]
 struct Open {
-    at: i64,
-    first_pts: i64,
+    key: Key,
     /// When `on` takes effect.
     on_at: f64,
-    off_said: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Said {
+    row: Row,
+    feed: Key,
 }
 
 #[derive(Clone, Debug, Default)]
 struct State {
-    open: Option<Open>,
+    open: Vec<Open>,
+    /// Feeds whose end was said while they were current, until the host
+    /// lists them as ended.
+    done: Vec<Key>,
     /// Rows said with a time still to come, in the order they were said.
-    queue: Vec<Row>,
+    queue: Vec<Said>,
 }
 
 pub struct Presence {
@@ -214,98 +242,111 @@ impl Presence {
     }
 
     /// One tick at `now` on `clock`, `step` the clock's frame length when it
-    /// is known, and each entry's feed as the tick sees it, in entry order.
-    /// Answers the rows due by `now`, each with its `at`.
-    pub fn tick(
-        &mut self,
-        now: i64,
-        step: Option<i64>,
-        clock: Clock,
-        feeds: &[Option<Feed>],
-    ) -> Vec<Row> {
+    /// is known, and what the tick says of each entry's input, in entry
+    /// order. Answers the rows due by `now`, each with its `at`.
+    ///
+    /// Every row's time comes from the feed's record alone, so an instance
+    /// handed any subset of the ticks says the same rows at the same times.
+    pub fn tick(&mut self, now: i64, step: Option<i64>, clock: Clock, seen: &[Seen]) -> Vec<Row> {
         let mut due = Vec::new();
+        let now_s = clock.seconds(now);
         for (n, entry) in self.entries.iter().enumerate() {
-            let feed = feeds.get(n).copied().flatten();
             let state = &mut self.states[n];
-            edges(entry, state, now, step, clock, feed);
-            let now_s = clock.seconds(now);
-            let (ready, later): (Vec<Row>, Vec<Row>) = std::mem::take(&mut state.queue)
+            if let Some(seen) = seen.get(n) {
+                for feed in &seen.ended {
+                    learn(entry, state, step, clock, feed, true);
+                }
+                if let Some(feed) = &seen.current {
+                    learn(entry, state, step, clock, feed, false);
+                }
+            }
+            let (ready, later): (Vec<Said>, Vec<Said>) = std::mem::take(&mut state.queue)
                 .into_iter()
-                .partition(|r| r.at.is_some_and(|at| at <= now_s));
+                .partition(|s| s.row.at.is_some_and(|at| at <= now_s));
             state.queue = later;
-            due.extend(ready);
+            due.extend(ready.into_iter().map(|s| s.row));
         }
         due
     }
 }
 
-fn say(rows: &[Row], at: f64, queue: &mut Vec<Row>) {
-    queue.extend(rows.iter().map(|r| Row {
-        at: Some(at),
-        ..r.clone()
+fn say(rows: &[Row], at: f64, feed: Key, queue: &mut Vec<Said>) {
+    queue.extend(rows.iter().map(|r| Said {
+        row: Row {
+            at: Some(at),
+            ..r.clone()
+        },
+        feed,
     }));
 }
 
-fn edges(
+/// What a feed's record says: its start once, and its end once it has one.
+/// `ended` is a feed the host lists as gone, whose end this instance may
+/// not have been told ahead of it.
+fn learn(
     entry: &Entry,
     state: &mut State,
-    now: i64,
     step: Option<i64>,
     clock: Clock,
-    feed: Option<Feed>,
+    feed: &Feed,
+    ended: bool,
 ) {
-    let now_s = clock.seconds(now);
-    if let Some(open) = state.open {
-        let same = feed.is_some_and(|f| (f.at, f.first_pts) == (open.at, open.first_pts));
-        if !same {
-            if open.at > now {
-                state.queue.clear();
-                say(&entry.coming, now_s, &mut state.queue);
-            } else if !open.off_said {
-                say(&entry.off, now_s.max(open.on_at), &mut state.queue);
-            }
-            state.open = None;
+    let key = feed.key();
+    if let Some(n) = state.done.iter().position(|k| *k == key) {
+        if ended {
+            state.done.remove(n);
         }
+        return;
     }
-    let Some(feed) = feed else {
+    let open = match state.open.iter().find(|o| o.key == key) {
+        Some(open) => *open,
+        None => {
+            let open = start(entry, &mut state.queue, clock, feed);
+            state.open.push(open);
+            open
+        }
+    };
+    let Some(ends) = feed.ends else {
         return;
     };
-    if state.open.is_none() {
-        let on_at = if feed.at > now {
-            say(&entry.coming, now_s, &mut state.queue);
-            if let Some(select) = &entry.countdown {
-                let whole = clock.whole(now, feed.at);
-                let text = |k: i64| Row::text(None, select, &k.to_string());
-                if whole >= 1 && clock.before(feed.at, whole) > now_s {
-                    say(&[text(whole)], now_s, &mut state.queue);
-                }
-                for k in (1..=whole).rev() {
-                    say(&[text(k)], clock.before(feed.at, k), &mut state.queue);
-                }
-            }
-            let at = clock.seconds(feed.at);
-            say(&entry.on, at, &mut state.queue);
-            say(&entry.coming, at, &mut state.queue);
-            at
-        } else {
-            say(&entry.on, now_s, &mut state.queue);
-            now_s
-        };
-        state.open = Some(Open {
-            at: feed.at,
-            first_pts: feed.first_pts,
-            on_at,
-            off_said: false,
-        });
+    let back = clock.seconds(ends + step.unwrap_or(0));
+    if feed.at > ends {
+        state
+            .queue
+            .retain(|s| s.feed != key || s.row.at.is_some_and(|at| at < back));
+        say(&entry.coming, back, key, &mut state.queue);
+    } else {
+        let off = if ended { back } else { back - entry.lead_out };
+        say(&entry.off, off.max(open.on_at), key, &mut state.queue);
     }
-    if let (Some(open), Some(ends)) = (state.open.as_mut(), feed.ends)
-        && !open.off_said
-    {
-        let back = clock.seconds(ends + step.unwrap_or(0));
-        let at = (back - entry.lead_out).max(now_s).max(open.on_at);
-        say(&entry.off, at, &mut state.queue);
-        open.off_said = true;
+    state.open.retain(|o| o.key != key);
+    if !ended {
+        state.done.push(key);
     }
+}
+
+fn start(entry: &Entry, queue: &mut Vec<Said>, clock: Clock, feed: &Feed) -> Open {
+    let key = feed.key();
+    let known = clock.seconds(feed.known);
+    if feed.at <= feed.known {
+        say(&entry.on, known, key, queue);
+        return Open { key, on_at: known };
+    }
+    say(&entry.coming, known, key, queue);
+    if let Some(select) = &entry.countdown {
+        let whole = clock.whole(feed.known, feed.at);
+        let text = |k: i64| Row::text(None, select, &k.to_string());
+        if whole >= 1 && clock.before(feed.at, whole) > known {
+            say(&[text(whole)], known, key, queue);
+        }
+        for k in (1..=whole).rev() {
+            say(&[text(k)], clock.before(feed.at, k), key, queue);
+        }
+    }
+    let at = clock.seconds(feed.at);
+    say(&entry.on, at, key, queue);
+    say(&entry.coming, at, key, queue);
+    Open { key, on_at: at }
 }
 
 #[cfg(test)]
@@ -364,18 +405,82 @@ mod tests {
         assert!(Entry::parse_list(" ").unwrap().is_empty());
     }
 
-    #[test]
-    fn a_start_known_ahead_counts_down_and_the_end_leads_out() {
-        let mut p = Presence::new(vec![entry(FLEX)]);
-        let mut all = p.tick(10, Some(1), THIRTIETHS, &[None]);
-        for now in 25..=200 {
-            let feed = (now <= 160).then_some(Feed {
-                at: 100,
-                first_pts: 0,
-                ends: (now >= 120).then_some(160),
-            });
-            all.extend(p.tick(now, Some(1), THIRTIETHS, &[feed]));
+    /// The host for one input over `ticks`: `feed(t)` is the feed current on
+    /// tick `t`, and a feed that stops being current ends with `ends` at the
+    /// last tick it was. Answers what an instance handed only `mine` sees on
+    /// each of them.
+    fn host(
+        ticks: std::ops::RangeInclusive<i64>,
+        feed: impl Fn(i64) -> Option<Feed>,
+        mine: impl Fn(i64) -> bool,
+    ) -> Vec<(i64, Seen)> {
+        let mut ended: Vec<(i64, Feed)> = Vec::new();
+        let mut last: Option<(i64, Feed)> = None;
+        let mut told = i64::MIN;
+        let mut seen = Vec::new();
+        for t in ticks {
+            let current = feed(t);
+            if let Some((when, was)) = last
+                && current.map(|f| f.key()) != Some(was.key())
+            {
+                ended.push((
+                    t,
+                    Feed {
+                        ends: Some(when),
+                        ..was
+                    },
+                ));
+            }
+            last = current.map(|f| (t, f));
+            if mine(t) {
+                let gone = ended
+                    .iter()
+                    .filter(|(at, _)| *at > told && *at <= t)
+                    .map(|(_, f)| *f)
+                    .collect();
+                seen.push((
+                    t,
+                    Seen {
+                        current,
+                        ended: gone,
+                    },
+                ));
+                told = t;
+            }
         }
+        seen
+    }
+
+    fn run(p: &mut Presence, seen: &[(i64, Seen)]) -> Vec<Row> {
+        let mut all = Vec::new();
+        for (t, s) in seen {
+            all.extend(p.tick(*t, Some(1), THIRTIETHS, std::slice::from_ref(s)));
+        }
+        all
+    }
+
+    fn timed(known: i64, at: i64, first_pts: i64, ends: Option<i64>) -> Feed {
+        Feed {
+            known,
+            at,
+            first_pts,
+            ends,
+        }
+    }
+
+    #[test]
+    fn a_start_known_ahead_counts_down_from_known_and_the_end_leads_out() {
+        let mut p = Presence::new(vec![entry(FLEX)]);
+        let seen = host(
+            10..=200,
+            |t| {
+                (25..=160)
+                    .contains(&t)
+                    .then(|| timed(25, 100, 0, (t >= 120).then_some(160)))
+            },
+            |_| true,
+        );
+        let all = run(&mut p, &seen);
         let back = THIRTIETHS.seconds(161) - 0.5;
         assert_eq!(all.last().unwrap().at, Some(back));
         assert_eq!(
@@ -395,17 +500,13 @@ mod tests {
     #[test]
     fn a_wait_cut_short_says_coming_and_nothing_more() {
         let mut p = Presence::new(vec![entry(FLEX)]);
-        let mut all = Vec::new();
-        for now in 25..=120 {
-            let feed = (now < 60).then_some(Feed {
-                at: 100,
-                first_pts: 0,
-                ends: None,
-            });
-            all.extend(p.tick(now, Some(1), THIRTIETHS, &[feed]));
-        }
+        let seen = host(
+            25..=120,
+            |t| (t < 60).then(|| timed(25, 100, 0, None)),
+            |_| true,
+        );
         assert_eq!(
-            said(&all),
+            said(&run(&mut p, &seen)),
             [
                 row(25, "#s", "~coming"),
                 row(25, "#n", "2"),
@@ -422,16 +523,15 @@ mod tests {
                 "off": {"select": "#s", "change": "-in"}, "lead_out": 1}"##,
         );
         let mut p = Presence::new(vec![e]);
-        let mut all = Vec::new();
-        for now in 0..=60 {
-            let feed = (10..30).contains(&now).then_some(Feed {
-                at: 5,
-                first_pts: 0,
-                ends: None,
-            });
-            all.extend(p.tick(now, Some(1), THIRTIETHS, &[feed]));
-        }
-        assert_eq!(said(&all), [row(10, "#s", "+in"), row(30, "#s", "-in")]);
+        let seen = host(
+            0..=60,
+            |t| (10..30).contains(&t).then(|| timed(10, 5, 0, None)),
+            |_| true,
+        );
+        assert_eq!(
+            said(&run(&mut p, &seen)),
+            [row(10, "#s", "+in"), row(30, "#s", "-in")]
+        );
     }
 
     #[test]
@@ -440,25 +540,17 @@ mod tests {
             r##"{"input": 1, "on": {"select": "#s", "change": "+in"},
                 "off": {"select": "#s", "change": "-in"}}"##,
         )]);
-        let mut all = Vec::new();
-        for now in 0..=40 {
-            let feed = match now {
-                5..=14 => Some(Feed {
-                    at: 5,
-                    first_pts: 0,
-                    ends: None,
-                }),
-                15..=20 => Some(Feed {
-                    at: 15,
-                    first_pts: 900,
-                    ends: Some(20),
-                }),
+        let seen = host(
+            0..=40,
+            |t| match t {
+                5..=14 => Some(timed(5, 5, 0, None)),
+                15..=20 => Some(timed(15, 15, 900, Some(20))),
                 _ => None,
-            };
-            all.extend(p.tick(now, Some(1), THIRTIETHS, &[feed]));
-        }
+            },
+            |_| true,
+        );
         assert_eq!(
-            said(&all),
+            said(&run(&mut p, &seen)),
             [
                 row(5, "#s", "+in"),
                 row(15, "#s", "-in"),
@@ -466,5 +558,41 @@ mod tests {
                 row(21, "#s", "-in"),
             ]
         );
+    }
+
+    type Told = (i64, String, String);
+
+    /// The rows an instance has said by each tick it was handed, as
+    /// (tick, pts of each row due by then).
+    fn due_by(seen: &[(i64, Seen)]) -> Vec<(i64, Vec<Told>)> {
+        let mut p = Presence::new(vec![entry(FLEX)]);
+        let mut so_far = Vec::new();
+        seen.iter()
+            .map(|(t, s)| {
+                so_far.extend(p.tick(*t, Some(1), THIRTIETHS, std::slice::from_ref(s)));
+                let mut rows = said(&so_far);
+                rows.sort();
+                (*t, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_worker_says_the_same_rows_at_the_same_times() {
+        let feed = |t: i64| match t {
+            25..=160 => Some(timed(25, 100, 0, (t >= 120).then_some(160))),
+            200..=229 => Some(timed(200, 260, 7, None)),
+            300..=340 => Some(timed(300, 300, 9, None)),
+            _ => None,
+        };
+        let one = due_by(&host(0..=400, feed, |_| true));
+        let by_tick: std::collections::HashMap<i64, Vec<Told>> = one.into_iter().collect();
+        for workers in [2, 4, 7] {
+            for k in 0..workers {
+                for (t, rows) in due_by(&host(0..=400, feed, |t| t % workers == k)) {
+                    assert_eq!(rows, by_tick[&t], "worker {k} of {workers} at tick {t}");
+                }
+            }
+        }
     }
 }

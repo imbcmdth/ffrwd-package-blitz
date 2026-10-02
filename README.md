@@ -26,9 +26,10 @@ the same module on its own clock.
 
 ## Requires
 
-ffrwd 0.29. The module is a node, built against `ffrwd:av@0.19.0`: 0.29 is
-the first release that hosts a node, holds one source onto another's clock
-and hands a node rows from any producer in the query. 0.28 and earlier do
+ffrwd 0.29, whose `ffrwd/wasm` is 0.19.1. The module is a node, built
+against `ffrwd:av@0.19.1`: 0.29 is the first release that hosts a node,
+holds one source onto another's clock, hands a node rows from any producer
+in the query and keeps a record of each held input's feed. 0.28 and earlier do
 not load this package. The package needs no capabilities: no network, no
 files, no GPU. A held input fed by a port is handed whatever connects there by
 the host, which does the listening.
@@ -79,8 +80,8 @@ its own rate when it does not; `page` is the second declaration, with no
 Every row the document applies is folded as state, and a worker is handed
 the rows of the ticks it did not render, so `compose` and `page` spread
 over the sidecar's workers and the output is the same at any worker
-count. A call that gives `presence` runs on one worker, as the switch
-does: it learns when a feed starts and ends on the tick that happens.
+count. Presence rows are made from the host's record of each feed, which
+every worker is handed, so a call that gives `presence` spreads too.
 
 ## The document
 
@@ -219,10 +220,12 @@ order of `at`; rows with the same `at` keep their arrival order.
 ### Presence
 
 `presence` gives the document the rows `ffrwd/switch`'s `flex_input` sent
-at the edges of an insertion, made from what the host says of each held
-input's feed: when its first frame shows, and, once the source has ended,
-the last frame it shows. It is JSON text, one entry or an array, one entry
-per input:
+at the edges of an insertion, made from the host's record of each held
+input's feed: the frame its start was fixed on, the frame its first
+picture shows on, and, once the source has ended, the last frame it shows
+on. Every worker is handed that record, including the feeds that ended
+between two frames it rendered, so each says the same rows at the same
+times. It is JSON text, one entry or an array, one entry per input:
 
 ```pgsql
 presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
@@ -232,14 +235,16 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 
 - `on` takes effect at the feed's first frame; `off`, `on` again when left
   out (what a `~` toggle wants), `lead_out` seconds before `v` is shown
-  again, so a transition out ends as the feed's last frame leaves, or at
-  the frame the feed is seen to have gone when its end was not known
-  ahead.
+  again, so a transition out ends as the feed's last frame leaves, or on
+  the frame `v` is back when the end was not told ahead.
 - A start known ahead of itself (a source held for `lead`, a timed one
-  waiting for its time) says `coming` at once and again at the start, so a
-  toggle is on for the wait, and gives the `countdown` element the whole
-  seconds left, one a second, each at its own time. A wait cut short says
-  `coming` where it was cut and nothing more.
+  waiting for its time) says `coming` on the frame the start was fixed on
+  and again at the start, so a toggle is on for the wait, and gives the
+  `countdown` element the whole seconds left, one a second, each at its
+  own time. A wait cut short says `coming` where it was cut and nothing
+  more.
+- `tests/presence.sql` is an L-bar and a countdown driven by an ad's feed
+  alone, the same frame for frame at `--jobs 1` and `--jobs 4`.
 - Each message is a change object or an array of them, without `at`,
   which the feed's times fill in.
 
@@ -299,8 +304,7 @@ the whole run's frames a second.
 
 One worker renders 1080p30 with room to spare, and a change row costs a
 fraction of a millisecond on the frame it lands. 4K30 does not fit on
-one; `compose` and `page` spread over the sidecar's workers, except a
-call with `presence`.
+one; `compose` and `page` spread over the sidecar's workers.
 
 The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
 
@@ -340,13 +344,16 @@ The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
    `format("truetype")` or `format("woff")`, the font is skipped and the
    text falls back to DejaVu Sans. Subset a font to the glyphs the page
    uses: a font is a `data:` URI, and those are slow (5).
-8. **Presence runs on one worker.** The host says on every tick when a
-   feed's first frame shows and, once known, its last, but not when the
-   start became known nor when a feed it could not foretell the end of
-   went. A worker that did not render that tick would time `coming` and
-   such an `off` differently, so a call with `presence` runs on one
-   worker, as the switch does. One worker is enough for 1080p30 and not
-   for 4K30.
+8. **A lead out needs the end told that far ahead.** `off` is timed
+   `lead_out` before `v` is back, from the end the host foretells. A
+   stream from the query is read well ahead of the clock, so its end is
+   known in time. A feed whose end the host learns less than `lead_out`
+   ahead (a feed by port whose connection closes with little queued) has
+   its `off` applied on the frame each worker first hears of it, which
+   can differ by a frame or two between workers; give such a feed a
+   short `lead_out`, or none. A feed whose end was not told at all (a
+   `timeout`, a jump in the clock) goes `off` on the frame `v` is back,
+   on every worker.
 9. **Also:**
    - **The root element's background image does not fill the page**; only
      its colour does. Give `html, body { height: 100% }`, or put the
@@ -406,12 +413,14 @@ animation and a transition inserted at 3.01 s start at 3.01 s), late
 joiners, frame-parallel workers with and without the rows of skipped
 frames, rows with several inputs, the bypass of whichever input is drawn
 whole, inputs with no picture and of other sizes, which inputs are
-fetched, presence from feeds starting, ending and cut short, the shapes
+fetched, presence from feeds starting, ending and cut short on workers
+handed any share of the frames, the shapes
 of `compose` and `page`, the design scale at 720p, 1080p and 4K, 16:9,
 9:16 and square canvases, whole-pixel versus transform motion, fonts and
 images. They take a few seconds once built.
 `tests/stream_rows.sql` runs change rows from another node through the
-sidecar, and `tests/stream_rows2.sql` does it with a second picture held.
+sidecar, `tests/stream_rows2.sql` does it with a second picture held, and
+`tests/presence.sql` drives a document from a held input's feed.
 
 ## License
 

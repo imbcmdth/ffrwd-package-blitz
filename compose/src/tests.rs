@@ -34,7 +34,7 @@ fn picture(mark: u8) -> Vec<u8> {
 }
 
 fn streams(held: u32) -> Vec<BoundStream> {
-    let mut bound = vec![BoundStream::video("v", 0, W, H, "rgba", TB)];
+    let mut bound = vec![BoundStream::video("v", 0, W, H, "rgba", TB).rate(Rational::new(30, 1))];
     for k in 0..held {
         bound.push(BoundStream::video("inputs", 10 + k, W, H, "rgba", TB));
     }
@@ -125,9 +125,9 @@ fn page_is_a_source_at_its_rate() {
 }
 
 #[test]
-fn presence_runs_on_one_worker() {
+fn presence_spreads_over_workers() {
     let p = r##"{"presence":"{\"input\":1,\"on\":{\"select\":\"#stage\",\"change\":\"~on\"}}"}"##;
-    assert!(!shape(p, &["v", "inputs"]).unwrap().pure);
+    assert!(shape(p, &["v", "inputs"]).unwrap().pure);
     assert!(shape(r#"{"presence":"{\"input\":1,\"colour\":1}"}"#, &["v"]).is_err());
 }
 
@@ -199,6 +199,7 @@ fn a_feed_starting_and_ending_drives_presence() {
             tags: Vec::new(),
             first_pts: 0,
             at: 10,
+            known: 5,
         },
         ends,
     };
@@ -215,4 +216,69 @@ fn a_feed_starting_and_ending_drives_presence() {
     // On at the feed's first frame; off 0.1 s (three frames) before the
     // picture is the clock's own again, at tick 21.
     assert_eq!(on, (10..18).collect::<Vec<_>>());
+}
+
+#[test]
+fn workers_handed_alternate_ticks_show_presence_as_one_handed_every_tick_does() {
+    let html = format!(r#"{FULL}<div id="stage"><img src="ffrwd:0"><div id="b"></div></div>"#);
+    let presence = serde_json::to_string(
+        r##"{"input": 1, "on": {"select": "#stage", "change": "~on"}, "lead_out": 0.1}"##,
+    )
+    .unwrap();
+    let p = params(&html, &format!(r#""presence":{presence}"#));
+    let feed = |known, at, ends| Feed {
+        start: FeedStart {
+            tags: Vec::new(),
+            first_pts: at,
+            at,
+            known,
+        },
+        ends,
+    };
+    // A start told ahead and an end told ahead, then a start seen as it
+    // shows and an end no one was told of.
+    let current = |pts: i64| match pts {
+        3..=20 => Some(feed(3, 8, (pts >= 12).then_some(20))),
+        26..=33 => Some(feed(26, 26, None)),
+        _ => None,
+    };
+    let ended = |pts: i64| match pts {
+        21 => Some(feed(3, 8, Some(20))),
+        34 => Some(feed(26, 26, Some(33))),
+        _ => None,
+    };
+    let shown = |workers: i64, k: i64| -> Vec<(i64, bool)> {
+        let mut node = Harness::<Compose>::new(&p, streams(1)).unwrap();
+        let mut gone = Vec::new();
+        let mut out = Vec::new();
+        for pts in 0..40 {
+            gone.extend(ended(pts));
+            if pts % workers != k {
+                continue;
+            }
+            let mut tick = node.tick(pts).ordinal(pts as u64).frame(0, pts, picture(1));
+            if let Some(f) = current(pts) {
+                tick = tick.feed(10, f);
+            }
+            for f in gone.drain(..) {
+                tick = tick.ended(10, f);
+            }
+            out.push((pts, left(&node.process(&tick).unwrap()).is_none()));
+        }
+        out
+    };
+    let every: std::collections::HashMap<i64, bool> = shown(1, 0).into_iter().collect();
+    let on: Vec<i64> = (0..40).filter(|pts| every[pts]).collect();
+    assert_eq!(
+        on,
+        (8..18).chain(26..34).collect::<Vec<_>>(),
+        "on from each first frame; off 0.1 s ahead of a return told ahead, and on the return otherwise"
+    );
+    for workers in [2, 3] {
+        for k in 0..workers {
+            for (pts, is_on) in shown(workers, k) {
+                assert_eq!(is_on, every[&pts], "worker {k} of {workers} at {pts}");
+            }
+        }
+    }
 }
