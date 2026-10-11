@@ -1,0 +1,11 @@
+[package]
+name = "blitz-bench-doc"
+description = "What the 4K60 compositing experiment renders: the lbar document generalised to N inputs, synthetic rgba inputs with the frame counter burned in, and the row each frame writes. Shared by the native bench and the wasm run, so it has no renderer in it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

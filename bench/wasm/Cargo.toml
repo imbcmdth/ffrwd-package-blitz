@@ -1,0 +1,20 @@
+[package]
+name = "blitz-bench-compose"
+description = "Step C of the 4K60 compositing experiment: the harness as a source node in the shape of `page`, rendering through wgpu-wasi-webgpu under ffrwd-wasm, one row a frame on its rows output, ending itself after the run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "blitz_bench_compose"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+blitz-bench-doc = { path = "../doc" }
+blitz-bench-harness = { path = "../harness" }
+wgpu-wasi-webgpu = { path = "../../backend" }
+wgpu = { version = "29", default-features = false, features = ["wgsl"] }
+ffrwd-node.workspace = true
+serde.workspace = true
+serde_json.workspace = true

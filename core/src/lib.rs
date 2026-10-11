@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use anyrender::{ImageRenderer, PaintScene};
 use anyrender_vello_cpu::{ImageCacheConfig, VelloCpuImageRenderer};
-use blitz_dom::node::{ImageData, RasterImageData, SpecialElementData, Status};
+use blitz_dom::node::{ImageData, SpecialElementData, Status};
 use blitz_dom::{DocumentConfig, FontContext, NodeId, decode_font_bytes, local_name};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_traits::shell::{ColorScheme, Viewport};
@@ -34,6 +34,9 @@ pub use changes::{Row, Source, Timeline};
 pub use geometry::{Fit, Geometry, Placement};
 pub use params::Params;
 pub use session::{Output, Session};
+/// The picture a video element holds, for a caller that keeps one across
+/// frames (its blob id is what a renderer caches an upload by).
+pub use blitz_dom::node::RasterImageData;
 
 /// DejaVu Sans, the font every generic family resolves to: the sidecar has
 /// no system fonts. Its license is in `assets/DejaVu-LICENSE`.
@@ -385,13 +388,28 @@ impl Compositor {
         let Some((w, h)) = self.size_of(input) else {
             return;
         };
-        let image = RasterImageData::new(w, h, rgba);
+        self.set_frame_image(input, &RasterImageData::new(w, h, rgba));
+    }
+
+    /// `set_frame` with a picture the caller made and keeps: handed again
+    /// next frame, it carries the same blob id, so a renderer that caches
+    /// uploads by that id uploads it once.
+    pub fn set_frame_image(&mut self, input: u32, image: &RasterImageData) {
         for i in 0..self.refs.len() {
             let r = self.refs[i];
             if r.input == input {
-                self.set_image(r, Some(&image));
+                self.set_image(r, Some(image));
             }
         }
+    }
+
+    /// Paints the document, as last resolved and with the pictures last set,
+    /// into `scene`: any anyrender scene, a GPU renderer's included. The
+    /// pictures stay installed; the caller decides when they are released.
+    pub fn paint_into(&mut self, scene: &mut impl PaintScene) {
+        let (w, h) = (self.geometry.out_w, self.geometry.out_h);
+        let place = self.place;
+        paint_placed(scene, &mut self.doc, &place, w, h);
     }
 
     /// Paints the document into `self.out`, then puts the placeholders back

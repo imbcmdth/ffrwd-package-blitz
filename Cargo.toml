@@ -11,6 +11,14 @@ members = [
     # Test only: writes change rows, for the end-to-end test of rows from
     # another node. The lib SQL does not name it.
     "tests/producer",
+    # Native only: the 4K60 compositing experiment (plans/experiment-compose-4k60.md in ffrwd-cli).
+    "bench",
+    "bench/doc",
+    "bench/harness",
+    # Step C: the harness as a wasm source node on wgpu-wasi-webgpu.
+    "bench/wasm",
+    # wgpu over wasi:webgpu, for the wasm run of the experiment; empty on the native target.
+    "backend",
 ]
 resolver = "2"
 
@@ -58,3 +66,9 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 1
+
+# wgpu as published, with `webgpu` dropped from its default features: see
+# vendor/wgpu/README.ffrwd.md. Only the wasm32 build needs it; native builds are
+# unchanged by it.
+[patch.crates-io]
+wgpu = { path = "vendor/wgpu" }

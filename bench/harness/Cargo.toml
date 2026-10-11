@@ -1,0 +1,21 @@
+[package]
+name = "blitz-bench-harness"
+description = "The experiment's frame loop: the document over N synthetic inputs rendered by anyrender_vello_hybrid on whatever wgpu instance it is handed (native, or wasi:webgpu through wgpu-wasi-webgpu), one Row a frame. Shared by the native bench and the wasm module."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blitz-compose-core = { path = "../../core" }
+blitz-bench-doc = { path = "../doc" }
+anyrender.workspace = true
+anyrender_vello_hybrid = { version = "0.10.0", default-features = false }
+vello_hybrid = { version = "0.1", default-features = false, features = ["wgpu", "text"] }
+wgpu = { version = "29", default-features = false, features = ["wgsl"] }
+wgpu_context = "0.9.0"
+peniko.workspace = true
+kurbo.workspace = true
+rustc-hash = "2"
+vello_common = "0.1"
+pollster = "0.4"

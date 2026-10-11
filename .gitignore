@@ -4,3 +4,5 @@ ffrwd.links
 *.mkv
 *.nut
 /runs/
+# The experiment's rows and frame dumps.
+bench/out/

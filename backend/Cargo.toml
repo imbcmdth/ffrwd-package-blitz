@@ -1,0 +1,17 @@
+[package]
+name = "wgpu-wasi-webgpu"
+description = "wgpu's custom dispatch traits over wasi:webgpu@0.0.1, the wit the ffrwd sidecar hosts: a wgpu-based renderer runs in a wasm32-wasip2 module unchanged. Scoped to what vello_hybrid calls; empty on the native target."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "wgpu_wasi_webgpu"
+
+[dependencies]
+# The pins vello_hybrid 0.1 carries. `custom` exposes the dispatch traits.
+wgpu = { version = "29", default-features = false, features = ["custom", "wgsl"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "0.57.1"

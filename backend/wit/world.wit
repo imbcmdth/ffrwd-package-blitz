@@ -1,0 +1,9 @@
+// The imports this crate binds: wasi:webgpu@0.0.1 as the ffrwd sidecar
+// hosts it (its wit is read from ffrwd-cli's vendored copy, so guest and
+// host cannot drift). A module built with this crate includes this world
+// in its own, beside the node world ffrwd-node gives it.
+package ffrwd:wgpu-wasi-webgpu;
+
+world guest {
+  import wasi:webgpu/webgpu@0.0.1;
+}
