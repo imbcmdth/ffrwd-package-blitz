@@ -16,18 +16,21 @@
 //! (`ffrwd:gpu`): each input picture is drawn from the host's texture, a
 //! yuv420p one converted on the device first, and the frame is handed back
 //! as a texture, so no picture's bytes cross into the module or out of it.
+//! On the CPU a yuv420p picture is fetched as it is and converted to rgba
+//! here, in its stream's matrix and range.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use std::sync::Arc;
 
-use compose_core::gpu::MAX_PICTURE;
+use compose_core::gpu::{MAX_PICTURE, Matrix};
 use compose_core::params::{Log, Params as Document, Renderer};
 use compose_core::presence::{self, Clock, Entry, Presence, Seen};
 use compose_core::{
     Colour, Gpu, MAX_INPUTS, Output as Made, Picture, RasterImageData, Session, bit,
 };
+use ffrwd_frame::yuv;
 use ffrwd_node::{
     Anchor, Bound, BoundStream, Frame, Init, Input, Node, Out, Output, Rational, Result, Shape,
     StateRow, Tick,
@@ -74,9 +77,14 @@ const TIMED_TAG: &str = "smart_timed";
 
 const PIXEL_FORMAT: &str = "rgba";
 
-/// What a video input is taken as when its frames are held on the GPU: rgba,
-/// or yuv420p, which the module converts on the device.
-const GPU_PIXEL_FORMATS: [&str; 2] = [PIXEL_FORMAT, "yuv420p"];
+const YUV420P: &str = "yuv420p";
+
+/// What a video input is taken as, on either renderer: rgba, or yuv420p,
+/// which the module converts (on the device when its frames are held
+/// there). The compiler puts the first on the wire. rgba is first: on the
+/// CPU, converting a 4K picture here costs the module about 10 ms more
+/// than fetching it as rgba does.
+const PIXEL_FORMATS: [&str; 2] = [PIXEL_FORMAT, YUV420P];
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -245,24 +253,58 @@ struct Shown<'a> {
 }
 
 impl Shown<'_> {
-    /// Input `input`'s picture this tick, `w` x `h`: the one kept in
-    /// `pictures` when it is the same frame, fetched or taken as textures
-    /// otherwise. None when the input shows nothing or its bytes are not a
-    /// picture of that size.
-    fn picture(
-        &self,
-        pictures: &mut [Option<(FrameKey, RasterImageData)>],
-        input: u32,
-        (w, h): (u32, u32),
-    ) -> Result<Option<Picture>, String> {
-        let Some((id, frame)) = (match input {
+    /// Input `input`'s stream and frame this tick, if it shows one.
+    fn frame(&self, input: u32) -> Option<(u32, Frame)> {
+        match input {
             0 => self.clocked.clone(),
             k => self
                 .held
                 .get(k as usize - 1)
                 .copied()
                 .zip(self.frames.get(k as usize - 1).cloned().flatten()),
-        }) else {
+        }
+    }
+
+    /// Input `input`'s layout; an error for an input not read.
+    fn layout(&self, input: u32) -> Result<Layout, String> {
+        self.layouts
+            .get(input as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("input {input} is not read"))
+    }
+
+    /// Frame `index` of stream `id`, input `input`'s picture of `size`,
+    /// fetched and made straight rgba. None, said on stderr, when its bytes
+    /// are not a picture of that size.
+    fn rgba(
+        &self,
+        input: u32,
+        id: u32,
+        index: u32,
+        size: (u32, u32),
+    ) -> Result<Option<Vec<u8>>, String> {
+        let layout = self.layout(input)?;
+        match rgba_of(self.tick.fetch(id, index), layout, size) {
+            Ok(rgba) => Ok(Some(rgba)),
+            Err(e) => {
+                eprintln!("compose: input {input}: {e}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Input `input`'s picture this tick, `w` x `h`: the one kept in
+    /// `pictures` when it is the same frame, fetched (a yuv420p one
+    /// converted to rgba) or taken as textures otherwise. None when the
+    /// input shows nothing or its bytes are not a picture of that size.
+    fn picture(
+        &self,
+        pictures: &mut [Option<(FrameKey, RasterImageData)>],
+        input: u32,
+        (w, h): (u32, u32),
+    ) -> Result<Option<Picture>, String> {
+        let Some((id, frame)) = self.frame(input) else {
             return Ok(None);
         };
         let Some(slot) = pictures.get_mut(input as usize) else {
@@ -278,12 +320,10 @@ impl Shown<'_> {
             if let Some(image) = kept {
                 return Ok(Some(Picture::Bytes(image)));
             }
-            let bytes = self.tick.fetch(id, frame.index);
-            if let Err(e) = ffrwd_frame::Rgba::new(&bytes, w as usize, h as usize) {
-                eprintln!("compose: input {input}: {e}");
+            let Some(rgba) = self.rgba(input, id, frame.index, (w, h))? else {
                 return Ok(None);
-            }
-            let image = RasterImageData::new(w, h, Arc::new(bytes));
+            };
+            let image = RasterImageData::new(w, h, Arc::new(rgba));
             *slot = Some((key, image.clone()));
             return Ok(Some(Picture::Bytes(image)));
         }
@@ -295,12 +335,7 @@ impl Shown<'_> {
                 image
             }
         };
-        let layout = self
-            .layouts
-            .get(input as usize)
-            .copied()
-            .flatten()
-            .ok_or_else(|| format!("input {input} is not read"))?;
+        let layout = self.layout(input)?;
         let mut planes = frames::planes(id, frame.index, &layout.planes((w, h)))
             .map_err(|e| format!("input {input}: {e}"))?
             .into_iter();
@@ -330,16 +365,12 @@ impl Node for Compose {
         Entry::parse_list(&params.presence)?;
         let clocked = bound.has("v");
         frames::shaped(clocked);
-        let formats: &[&str] = match doc.renderer {
-            Renderer::Cpu => &[PIXEL_FORMAT],
-            Renderer::Auto | Renderer::Gpu => &GPU_PIXEL_FORMATS,
-        };
         let mut held = Input::video("inputs")
             .optional()
             .many()
             .anchor(Anchor::Tagged(TIMED_TAG.to_owned()))
             .lead(params.lead)
-            .pixel_formats(formats);
+            .pixel_formats(&PIXEL_FORMATS);
         if let Some(linger) = positive(params.linger) {
             held = held.linger(linger);
         }
@@ -373,7 +404,7 @@ impl Node for Compose {
         };
         if clocked {
             shape = shape
-                .input(Input::video("v").clock().pixel_formats(formats))
+                .input(Input::video("v").clock().pixel_formats(&PIXEL_FORMATS))
                 .output(video)
                 .one_to_one();
         } else {
@@ -409,18 +440,13 @@ impl Node for Compose {
                 .ok_or_else(|| format!("`{}` is a video input", stream.port))?;
             let layout = match video.pix_fmt.as_str() {
                 PIXEL_FORMAT => Layout::Rgba,
-                "yuv420p" if on_gpu => {
+                YUV420P => {
                     let color = video.color.clone().unwrap_or_default();
                     Layout::Yuv420p(Colour::of(&color.space, &color.range))
                 }
                 other => {
                     return Err(format!(
-                        "compose takes {} pictures, and `{}` is {other}",
-                        if on_gpu {
-                            "rgba or yuv420p"
-                        } else {
-                            PIXEL_FORMAT
-                        },
+                        "compose takes rgba or yuv420p pictures, and `{}` is {other}",
                         stream.port
                     )
                     .into());
@@ -460,9 +486,6 @@ impl Node for Compose {
         // atlas, so their size is no bound.
         let atlas: &[Option<(u32, u32)>] = if on_gpu { &[] } else { &sizes };
         session.set_gpu(choose(renderer, out, atlas, summary)?);
-        if session.gpu().is_none() {
-            refuse_yuv_on_the_cpu(&layouts)?;
-        }
         for e in session.take_errors() {
             eprintln!("compose: row error: {e}");
         }
@@ -520,9 +543,6 @@ impl Node for Compose {
                     choose(renderer, self.session.size(), atlas, summary)?
                 }
             };
-            if gpu.is_none() {
-                refuse_yuv_on_the_cpu(&self.layouts)?;
-            }
             self.session.set_gpu(gpu);
         }
         self.session.set_params(doc);
@@ -615,6 +635,17 @@ impl Node for Compose {
                     .ok_or("a picture held on the GPU is a texture")?;
                 frames::emit("video", pts, duration, frame)?;
             }
+            Made::Same(k) if self.layouts[k as usize] != Some(Layout::Rgba) => {
+                // A yuv picture cannot leave on the rgba output as it is: it
+                // leaves converted, and the time is the frame's.
+                let started = Instant::now();
+                let size = self.session.sizes()[k as usize].ok_or("a bypassed input is read")?;
+                let (id, frame) = shown.frame(k).ok_or("a bypassed input shows a picture")?;
+                if let Some(rgba) = shown.rgba(k, id, frame.index, size)? {
+                    out.frame("video", pts, duration, rgba)?;
+                }
+                self.session.add_time(started.elapsed().as_secs_f64() * 1e6);
+            }
             Made::Same(0) => {
                 if let Some((v, frame)) = &clocked {
                     out.pass("video", *v, frame)?;
@@ -653,18 +684,37 @@ impl Node for Compose {
     }
 }
 
-/// The CPU renderer takes rgba pictures alone: an input held on the GPU as
-/// yuv420p needs the GPU renderer.
-fn refuse_yuv_on_the_cpu(layouts: &[Option<Layout>]) -> Result<(), String> {
-    match layouts
-        .iter()
-        .position(|l| matches!(l, Some(Layout::Yuv420p(_))))
-    {
-        Some(k) => Err(format!(
-            "input {k} is yuv420p, which the GPU renderer converts and the CPU renderer does \
-             not take: compose renders on the CPU here"
-        )),
-        None => Ok(()),
+/// ffrwd-frame's name for a colour: the same matrix and range.
+fn frame_colour(colour: Colour) -> yuv::Colour {
+    yuv::Colour {
+        range: if colour.full {
+            yuv::Range::Pc
+        } else {
+            yuv::Range::Tv
+        },
+        matrix: match colour.matrix {
+            Matrix::Bt601 => yuv::Matrix::Bt601,
+            Matrix::Bt709 => yuv::Matrix::Bt709,
+        },
+    }
+}
+
+/// `bytes`, a picture of `w` x `h` laid out as `layout` says, as straight
+/// rgba: rgba as it is, yuv420p converted. An error when the bytes are not
+/// a picture of that size.
+fn rgba_of(bytes: Vec<u8>, layout: Layout, (w, h): (u32, u32)) -> Result<Vec<u8>, String> {
+    let (w, h) = (w as usize, h as usize);
+    match layout {
+        Layout::Rgba => {
+            ffrwd_frame::Rgba::new(&bytes, w, h)?;
+            Ok(bytes)
+        }
+        Layout::Yuv420p(colour) => {
+            let frame = yuv::Yuv420p::new(&bytes, w, h)?;
+            let mut rgba = vec![0u8; w * h * 4];
+            yuv::to_rgba(&frame, frame_colour(colour), &mut rgba)?;
+            Ok(rgba)
+        }
     }
 }
 

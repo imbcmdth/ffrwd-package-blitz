@@ -329,6 +329,17 @@ impl Session {
         out
     }
 
+    /// Adds `us` microseconds to the last frame's time: work the caller
+    /// did for that frame once `frame_with` returned, such as converting a
+    /// picture handed back.
+    pub fn add_time(&mut self, us: f64) {
+        self.last.total_us += us;
+        self.totals.total_us += us;
+        if !self.last.bypassed {
+            self.totals.rendered_us += us;
+        }
+    }
+
     /// The per-frame log line, when `log` asks for one.
     pub fn frame_line(&self, t: f64) -> Option<String> {
         if self.params.log != Log::Frame {

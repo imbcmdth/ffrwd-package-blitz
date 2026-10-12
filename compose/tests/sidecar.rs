@@ -21,11 +21,15 @@
 //! and a counter, as lavfi's testsrc2 has) and the ad (the orange gradient
 //! and the moving ball of the example's page).
 //!
+//! On the CPU the module takes yuv420p too, and converts it itself: one case
+//! feeds a CPU run yuv420p and another the rgba ffmpeg converts those
+//! planes to, and compares them.
+//!
 //! `lbar_frames_a_second`, ignored by default, measures the example's
 //! frames a second at 1080p and 4K on each path, for the README:
 //! `cargo test -p compose --test sidecar -- --ignored --nocapture`.
 
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -212,6 +216,21 @@ impl Pictures {
         }
     }
 
+    /// The same yuv420p pictures, and as rgba the planes as ffmpeg converts
+    /// them, swscale given `flags`; None when there is no ffmpeg on the PATH.
+    fn yuv420p_by_ffmpeg(size: (u32, u32), flags: &str) -> Option<Pictures> {
+        let ours = Pictures::yuv420p(size);
+        let (programme_yuv, ad_yuv) = ours.yuv.expect("yuv420p pictures");
+        let programme = ffmpeg_rgba(&programme_yuv, size, flags)?;
+        let ad = ffmpeg_rgba(&ad_yuv, AD, flags)?;
+        Some(Pictures {
+            size,
+            programme,
+            ad,
+            yuv: Some((programme_yuv, ad_yuv)),
+        })
+    }
+
     /// Picture `k` of the programme and of the ad, as `feed` hands them.
     fn frame(&self, feed: Feed, k: usize) -> (&[u8], &[u8]) {
         match (feed, &self.yuv) {
@@ -289,6 +308,37 @@ fn from_yuv420p(planes: &[Vec<u8>; 3], (w, h): (u32, u32)) -> Vec<u8> {
         }
     }
     out
+}
+
+/// `pictures`, yuv420p of `w` x `h` untagged (BT.601, limited range, as
+/// the module reads them), converted to rgba by ffmpeg with swscale's
+/// `flags`; None when there is no ffmpeg on the PATH.
+fn ffmpeg_rgba(pictures: &[Packed], (w, h): (u32, u32), flags: &str) -> Option<Vec<Vec<u8>>> {
+    let size = format!("{w}x{h}");
+    let filter = format!("scale=in_color_matrix=bt601:in_range=tv:flags={flags},format=rgba");
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args([
+            "-s", &size, "-i", "-", "-vf", &filter, "-f", "rawvideo", "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take().unwrap();
+    let input = pictures.concat();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output().unwrap();
+    writer.join().unwrap().unwrap();
+    assert!(
+        out.status.success(),
+        "ffmpeg: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let frame = (w * h * 4) as usize;
+    assert_eq!(out.stdout.len(), frame * pictures.len());
+    Some(out.stdout.chunks(frame).map(<[u8]>::to_vec).collect())
 }
 
 /// The programme's still part: colour bars over the top two thirds, a grey
@@ -729,6 +779,55 @@ fn the_lbar_example_on_yuv420p_textures_matches_the_cpu() {
     assert!(
         converted <= 2 * FRAMES,
         "{converted} conversions for {FRAMES} frames of two inputs"
+    );
+}
+
+#[test]
+fn the_lbar_example_on_the_cpu_from_yuv420p_matches_ffmpeg_s_rgba() {
+    let (Some(sidecar), Some(module)) = (sidecar(), module()) else {
+        return;
+    };
+    // swscale computed exactly, each chroma sample over the two by two
+    // pixels it covers, as the module converts.
+    let flags = "neighbor+accurate_rnd+full_chroma_int";
+    let Some(pictures) = Pictures::yuv420p_by_ffmpeg((W, H), flags) else {
+        eprintln!("SKIPPED: no ffmpeg on the PATH");
+        return;
+    };
+    let pictures = Arc::new(pictures);
+    let start = |feed| Run::start(&sidecar, &module, "cpu", &pictures, feed, FRAMES, None);
+    let (mut yuv, mut rgba) = (start(Feed::Yuv420p), start(Feed::Rgba));
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    let (mut frames, mut far, mut max) = (0u64, 0u64, 0u8);
+    loop {
+        let (pa, pb) = match (yuv.next(&mut a), rgba.next(&mut b)) {
+            (Some(pa), Some(pb)) => (pa, pb),
+            (None, None) => break,
+            (pa, pb) => panic!("one run ended first: yuv420p at {pa:?}, rgba at {pb:?}"),
+        };
+        assert_eq!(pa, pb, "the runs' frames are at different times");
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            let off = x.abs_diff(*y);
+            max = max.max(off);
+            far += u64::from(off > 1);
+        }
+        frames += 1;
+    }
+    let yuv_log = yuv.finish("cpu");
+    rgba.finish("cpu");
+    assert!(yuv_log.contains("on the CPU"), "{yuv_log}");
+    assert_eq!(frames, FRAMES, "frames out");
+    let samples = u64::from(W * H) * 4 * frames;
+    eprintln!(
+        "{frames} frames of {W}x{H} from yuv420p against ffmpeg's rgba: the largest \
+         difference is {max}, and {far} of {samples} samples ({:.5}%) differ by more than 1",
+        far as f64 * 100.0 / samples as f64
+    );
+    assert!(max <= 2, "a sample {max} levels off");
+    assert!(
+        far as f64 <= 0.001 * samples as f64,
+        "{far} samples more than one level off"
     );
 }
 
