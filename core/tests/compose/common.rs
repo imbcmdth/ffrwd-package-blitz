@@ -67,6 +67,7 @@ pub fn bytes(out: Output) -> Vec<u8> {
     match out {
         Output::New(b) => b,
         Output::Same(_) => panic!("expected a rendered frame, got the bypass"),
+        Output::Rendered(_) => panic!("expected bytes, got a texture"),
     }
 }
 

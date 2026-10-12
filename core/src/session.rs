@@ -7,15 +7,17 @@ use std::time::Instant;
 
 use crate::changes::{Row, Source, Timed, Timeline};
 use crate::params::{Log, Params};
-use crate::{Compositor, Gpu, Plan, RasterImageData, bit};
+use crate::{Compositor, Gpu, Picture, Plan, RasterImageData, bit};
 
 /// What one frame turns into.
 #[derive(Debug, PartialEq)]
 pub enum Output {
-    /// This input's bytes, which were never fetched.
+    /// This input's picture, which was never fetched.
     Same(u32),
-    /// A new frame.
+    /// A new frame, as bytes.
     New(Vec<u8>),
+    /// A new frame the GPU renderer drew, as a texture of its device.
+    Rendered(wgpu::Texture),
 }
 
 /// Per-frame timings in microseconds.
@@ -165,6 +167,10 @@ impl Session {
         self.comp.gpu()
     }
 
+    pub fn gpu_mut(&mut self) -> Option<&mut Gpu> {
+        self.comp.gpu_mut()
+    }
+
     /// The output frame's size.
     pub fn size(&self) -> (u32, u32) {
         self.out
@@ -254,6 +260,22 @@ impl Session {
         absent: u64,
         fetch: &mut dyn FnMut(u32, (u32, u32)) -> Option<RasterImageData>,
     ) -> Output {
+        self.frame_with(t, absent, &mut |input, size| {
+            fetch(input, size).map(Picture::Bytes)
+        })
+    }
+
+    /// `frame_pictures`, with `fetch` handing over each input's picture in
+    /// any form the renderer takes: bytes, or with a GPU renderer textures
+    /// of its device, which the renderer draws from where they are (a yuv
+    /// picture converted on the device once per blob id). The frame is
+    /// `Output::Rendered` when the GPU renderer drew it.
+    pub fn frame_with(
+        &mut self,
+        t: f64,
+        absent: u64,
+        fetch: &mut dyn FnMut(u32, (u32, u32)) -> Option<Picture>,
+    ) -> Output {
         let start = Instant::now();
         let step = self.tl.advance(&mut self.comp, t);
         let s = Instant::now();
@@ -280,16 +302,19 @@ impl Session {
                     let Some((w, h)) = self.comp.size_of(input) else {
                         continue;
                     };
-                    if let Some(image) = fetch(input, (w, h))
-                        && (image.width, image.height) == (w, h)
+                    if let Some(picture) = fetch(input, (w, h))
+                        && (picture.image().width, picture.image().height) == (w, h)
                     {
-                        self.comp.set_frame_image(input, &image);
+                        self.comp.set_frame_picture(input, picture);
                         st.fetched += 1;
                     }
                 }
                 st.fetch_us = us(s);
                 (st.paint_cmds_us, st.raster_us) = self.comp.paint_without(absent);
-                Output::New(std::mem::take(&mut self.comp.out))
+                match self.comp.take_rendered() {
+                    Some(frame) => Output::Rendered(frame),
+                    None => Output::New(std::mem::take(&mut self.comp.out)),
+                }
             }
         };
         st.total_us = us(start);
@@ -332,8 +357,16 @@ impl Session {
         }
         let t = &self.totals;
         let rendered = t.frames - t.bypassed;
+        let gpu = match self.comp.gpu() {
+            Some(gpu) => format!(
+                "; on the GPU, {} pictures uploaded and {} converted",
+                gpu.uploads(),
+                gpu.conversions()
+            ),
+            None => String::new(),
+        };
         Some(format!(
-            "blitz: {} frames, {} bypassed, {} rows; mean {:.3} ms a frame, {:.3} ms a rendered frame",
+            "blitz: {} frames, {} bypassed, {} rows; mean {:.3} ms a frame, {:.3} ms a rendered frame{gpu}",
             t.frames,
             t.bypassed,
             t.rows,

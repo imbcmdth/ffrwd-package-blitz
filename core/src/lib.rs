@@ -37,7 +37,7 @@ use peniko::{Color, Fill};
 pub use blitz_dom::node::RasterImageData;
 pub use changes::{Row, Source, Timeline};
 pub use geometry::{Fit, Geometry, Placement};
-pub use gpu::Gpu;
+pub use gpu::{Colour, Gpu, Picture};
 pub use params::Params;
 pub use session::{Output, Session};
 
@@ -145,8 +145,10 @@ pub struct Compositor {
     refs: Vec<VideoRef>,
     /// The GPU renderer, when the frame is rasterised there instead.
     gpu: Option<Gpu>,
-    /// The pictures handed over since the last paint.
-    pictures: Vec<RasterImageData>,
+    /// The pictures handed over since the last paint, by input.
+    pictures: Vec<(u32, Picture)>,
+    /// The frame the GPU renderer last made, until it is taken.
+    rendered: Option<wgpu::Texture>,
     /// The rendered frame, RGBA8 (premultiplied, which is straight RGBA
     /// wherever the page is opaque).
     pub out: Vec<u8>,
@@ -219,6 +221,7 @@ impl Compositor {
             refs: Vec::new(),
             gpu: None,
             pictures: Vec::new(),
+            rendered: None,
             out: vec![0; (width as usize) * (height as usize) * 4],
         };
         // Before the first layout, so an `<img>` with no CSS size is laid
@@ -404,11 +407,19 @@ impl Compositor {
     /// next frame, it carries the same blob id, so a renderer that caches
     /// uploads by that id uploads it once.
     pub fn set_frame_image(&mut self, input: u32, image: &RasterImageData) {
-        self.pictures.push(image.clone());
+        self.set_frame_picture(input, Picture::Bytes(image.clone()));
+    }
+
+    /// `set_frame_image` with a picture in any of the forms the GPU
+    /// renderer takes. One given as a texture is drawn only by the GPU
+    /// renderer; the CPU renderer draws nothing for it.
+    pub fn set_frame_picture(&mut self, input: u32, picture: Picture) {
+        let image = picture.image().clone();
+        self.pictures.push((input, picture));
         for i in 0..self.refs.len() {
             let r = self.refs[i];
             if r.input == input {
-                self.set_image(r, Some(image));
+                self.set_image(r, Some(&image));
             }
         }
     }
@@ -423,8 +434,9 @@ impl Compositor {
         paint_placed(scene, &mut self.doc, &place, w, h);
     }
 
-    /// Paints the document into `self.out`, then puts the placeholders back
-    /// so the frames' buffers are released. Returns (paint_cmds_us,
+    /// Paints the document into `self.out`, or on the GPU into a new
+    /// texture that `take_rendered` hands over, then puts the placeholders
+    /// back so the frames' buffers are released. Returns (paint_cmds_us,
     /// raster_us).
     pub fn paint(&mut self) -> (f64, f64) {
         self.paint_without(0)
@@ -440,15 +452,28 @@ impl Compositor {
         }
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
-        let doc = &mut self.doc;
         let pictures = std::mem::take(&mut self.pictures);
         if let Some(gpu) = self.gpu.as_mut() {
-            let times = gpu.render(&mut self.out, &pictures, |scene| {
+            let doc = &mut self.doc;
+            let (frame, cmds, raster) = gpu.render(&pictures, |scene| {
                 paint_placed(scene, doc, &place, w, h);
             });
+            self.rendered = Some(frame);
             self.install_placeholders();
-            return times;
+            return (cmds, raster);
         }
+        // The CPU renderer has nothing to draw a texture with.
+        for (input, picture) in &pictures {
+            if picture.on_gpu() {
+                for i in 0..self.refs.len() {
+                    let r = self.refs[i];
+                    if r.input == *input {
+                        self.set_image(r, None);
+                    }
+                }
+            }
+        }
+        let doc = &mut self.doc;
         self.out.resize((w as usize) * (h as usize) * 4, 0);
         let mut cmds = 0.0;
         let t_all = Instant::now();
@@ -484,6 +509,15 @@ impl Compositor {
     /// The GPU renderer in use, if any.
     pub fn gpu(&self) -> Option<&Gpu> {
         self.gpu.as_ref()
+    }
+
+    pub fn gpu_mut(&mut self) -> Option<&mut Gpu> {
+        self.gpu.as_mut()
+    }
+
+    /// The frame the GPU renderer made at the last paint, taken out.
+    pub fn take_rendered(&mut self) -> Option<wgpu::Texture> {
+        self.rendered.take()
     }
 
     /// How many video inputs this instance reads.
