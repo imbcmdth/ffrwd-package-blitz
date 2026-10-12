@@ -10,8 +10,8 @@ class at 3.01 s starts its transition at exactly 3.01 s.
 The document is rendered by [Blitz](https://github.com/DioxusLabs/blitz)
 (Stylo for CSS, Taffy for layout, Parley for text, blitz-paint and Vello for
 pixels), compiled to a wasm module that ffrwd's sidecar hosts. Vello
-rasterises on the GPU when the host has one (vello_hybrid, through
-wasi:webgpu) and on the CPU otherwise (vello_cpu); see
+rasterises on the CPU (vello_cpu) by default, and on the GPU (vello_hybrid,
+through wasi:webgpu) when a call asks for it; see
 [The GPU path](#the-gpu-path).
 
 ![Programme full frame](https://raw.githubusercontent.com/imbcmdth/ffrwd-package-blitz/main/examples/lbar-1-in.png)
@@ -40,7 +40,17 @@ and the package's `ffrwd/wasm` is 0.19.1.
 The package asks for one capability, `gpu`, which the compiler grants to
 every module that imports wasi:webgpu (it reads the import from the
 module's describe and passes `-gpu` to the sidecar). It needs no network
-and no files. A held input fed by a port is handed whatever connects there
+and no files.
+
+The `gpu` capability has a cost in this release, even on the default CPU
+path. The compiler runs a sidecar holding a module granted `-gpu` on at
+most two workers, so a query runs this module on two workers where 0.2.1
+ran on all of them. On the measuring machine that makes the lbar example
+about a third slower at 1080p (78 fps against 115) and over 40% slower at
+4K (20 fps against 35); see [Performance](#the-gpu-path-and-the-cpu-path-030).
+The figures for all workers are 0.3.0's CPU path, which rasterises as 0.2.1
+does. The cap goes when the sidecar shares one GPU device across its
+workers. A held input fed by a port is handed whatever connects there
 by the host, which does the listening.
 
 ## A minimal query
@@ -271,7 +281,7 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
-| `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). |
+| `renderer` | text | `'cpu'` | Who rasterises the document: `'cpu'` (no adapter asked for), `'auto'` (the GPU when the host has an adapter, the CPU otherwise) or `'gpu'` (refused with no adapter). See [The GPU path](#the-gpu-path). |
 | `fps` | number | `30` | `page`: frames a second. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |
 
@@ -298,16 +308,17 @@ another size than the output's.
 
 ## The GPU path
 
-When an instance opens, it asks the host for a GPU adapter through
-wasi:webgpu, with wgpu running on
+With `renderer => 'auto'` or `renderer => 'gpu'`, an instance asks the
+host for a GPU adapter when it opens, through wasi:webgpu, with wgpu
+running on
 [wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu). With an
 adapter, blitz-paint paints the document into anyrender_vello_hybrid,
 which prepares the scene on the CPU and rasterises it on the GPU into a
 texture of the output's size. The texture is copied into a buffer, the
 buffer is mapped, and its bytes become the frame the module hands on:
 RGBA8 at the output's size, premultiplied where the page is translucent,
-as the CPU path's frames are. With no adapter, everything is as in 0.2,
-on vello_cpu.
+as the CPU path's frames are. With no adapter, and with the default
+`renderer => 'cpu'`, everything is as in 0.2, on vello_cpu.
 
 Only the rasteriser changes. The document, the change rows, presence, the
 choice of which inputs a frame draws and the bypass are the same on both
@@ -315,13 +326,20 @@ paths, and a frame handed back uncopied reaches neither.
 
 `renderer` chooses:
 
-- `'auto'`, the default: the GPU when the host has an adapter, and the
-  CPU otherwise. The CPU also when an input's pictures are larger than
-  4096 px on a side, which vello_hybrid's image atlas does not take.
+- `'cpu'`, the default: the CPU. No adapter is asked for.
+- `'auto'`: the GPU when the host has an adapter, and the CPU otherwise.
+  The CPU also when an input's pictures are larger than 4096 px on a side,
+  which vello_hybrid's image atlas does not take.
 - `'gpu'`: the GPU, or a refusal when the instance opens, naming
   `renderer => 'gpu'` and the reason (no adapter, a device refused, a
   frame or picture too large).
-- `'cpu'`: the CPU. No adapter is asked for.
+
+The default is `'cpu'` in this release because the GPU path reads every
+frame back from the GPU into the module, and copies every picture up to
+it, so on this release's sidecar a default run is faster on the CPU (see
+[Performance](#the-gpu-path-and-the-cpu-path-030)). The next stage of this
+work has the sidecar hand the frame on as a GPU texture, with no readback;
+once it does, the default moves to `'auto'`.
 
 `log => 'summary'` names the path, and the adapter, in the line each
 instance opens with. New parameters (`set-params`) that change `renderer`
@@ -400,12 +418,19 @@ encoded around it. Frames a second are the frames read over the wall time
 from the first frame out to the last; the time a rendered frame is the
 module's own mean, from its `log => 'summary'` line, on one worker.
 
-| output | path | one worker (`-jobs 1`) | the sidecar's default workers |
-|---|---|---|---|
-| 1080p | GPU | 74 fps, 16.6 ms a rendered frame | 95 fps |
-| 1080p | CPU | 71 fps, 17.9 ms a rendered frame | 115 fps |
-| 4K | GPU | 19 fps, 65 ms a rendered frame | 29 fps |
-| 4K | CPU | 16 fps, 81 ms a rendered frame | 35 fps |
+| output | path | one worker (`-jobs 1`) | two workers (`-jobs 2`) | the sidecar's default workers |
+|---|---|---|---|---|
+| 1080p | GPU | 74 fps, 16.6 ms a rendered frame | 70 fps | 95 fps |
+| 1080p | CPU | 71 fps, 17.9 ms a rendered frame | 78 fps | 115 fps |
+| 4K | GPU | 19 fps, 65 ms a rendered frame | 23 fps | 29 fps |
+| 4K | CPU | 16 fps, 81 ms a rendered frame | 20 fps | 35 fps |
+
+Two workers is what a query through ffrwd gets today, on either path: the
+compiler grants `-gpu` to this module because it imports wasi:webgpu,
+whatever `renderer` says, and caps a sidecar holding a module with that
+grant at two workers, since each worker opens a GPU device of its own; the
+cap is lifted when the sidecar shares one device across its workers. The
+`-jobs 2` figures are the mean of two runs.
 
 The numbers vary by about 5% from run to run. On one worker the GPU path
 is somewhat faster, the more so at 4K, where vello_cpu's rasterising takes
@@ -417,9 +442,8 @@ and reading the frame back. Spread over the sidecar's workers the CPU
 path ran faster here: both paths level off by four workers, and the
 GPU path makes two more copies a frame (the pictures up to the GPU, and
 the frame back).
-`renderer => 'cpu'` is the better choice for a run spread over many
-workers on a machine with cores to spare; the GPU path leaves the cores
-free for other work, such as the encoder.
+At two workers the GPU path is the faster at 4K and the slower at 1080p;
+it also leaves the CPU's cores free for other work, such as the encoder.
 
 The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
 
@@ -504,6 +528,10 @@ The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
      or not the machine has a GPU: the module imports wasi:webgpu, and
      such a sidecar does not host it. There is no fallback to the CPU in
      that case; use 0.2.1 there.
+   - **A query runs this module on two workers**, on either path: the
+     compiler caps a sidecar holding a module granted `-gpu` at two
+     workers. A run that 0.2.1 spread over every core is slower for it;
+     see [Requires](#requires).
    - **Short animations cost extra resolves.** Blitz moves a CSS animation
      on by at most one iteration per resolve, so when frames are further
      apart than half the shortest animation (a worker that renders every
