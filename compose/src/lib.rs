@@ -12,7 +12,10 @@
 //!
 //! The document is rasterised on the CPU by default (`renderer` `cpu`), and
 //! on the GPU through wgpu over wasi:webgpu with `renderer` `gpu`, or `auto`
-//! when the host has one; the frame that leaves is the same RGBA either way.
+//! when the host has one. On the GPU the video ports are held there too
+//! (`ffrwd:gpu`): each input picture is drawn from the host's texture, a
+//! yuv420p one converted on the device first, and the frame is handed back
+//! as a texture, so no picture's bytes cross into the module or out of it.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -22,13 +25,41 @@ use std::sync::Arc;
 use compose_core::gpu::MAX_PICTURE;
 use compose_core::params::{Log, Params as Document, Renderer};
 use compose_core::presence::{self, Clock, Entry, Presence, Seen};
-use compose_core::{Gpu, MAX_INPUTS, Output as Made, RasterImageData, Session, bit};
+use compose_core::{
+    Colour, Gpu, MAX_INPUTS, Output as Made, Picture, RasterImageData, Session, bit,
+};
 use ffrwd_node::{
-    Anchor, Bound, BoundStream, Init, Input, Node, Out, Output, Rational, Result, Shape, StateRow,
-    Tick,
+    Anchor, Bound, BoundStream, Frame, Init, Input, Node, Out, Output, Rational, Result, Shape,
+    StateRow, Tick,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
+
+#[cfg(target_arch = "wasm32")]
+mod frames;
+
+/// On any target but wasm32 there is no host to hold frames on the GPU.
+#[cfg(not(target_arch = "wasm32"))]
+mod frames {
+    pub fn shaped(_clocked: bool) {}
+
+    pub fn planes(
+        _id: u32,
+        _index: u32,
+        _sizes: &[(u32, u32, wgpu::TextureFormat)],
+    ) -> Result<Vec<wgpu::Texture>, String> {
+        Err("frames are held on the GPU only by a wasm32 module".to_owned())
+    }
+
+    pub fn emit(
+        _port: &str,
+        _pts: i64,
+        _duration: Option<i64>,
+        _texture: wgpu::Texture,
+    ) -> Result<(), String> {
+        Err("frames are held on the GPU only by a wasm32 module".to_owned())
+    }
+}
 
 const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"cpu"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
@@ -42,6 +73,10 @@ const CHANGES_SCHEMA: &str =
 const TIMED_TAG: &str = "smart_timed";
 
 const PIXEL_FORMAT: &str = "rgba";
+
+/// What a video input is taken as when its frames are held on the GPU: rgba,
+/// or yuv420p, which the module converts on the device.
+const GPU_PIXEL_FORMATS: [&str; 2] = [PIXEL_FORMAT, "yuv420p"];
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -95,8 +130,9 @@ fn instance() -> wgpu::Instance {
 }
 
 /// The GPU renderer `renderer` asks for, for frames of `out` over pictures
-/// of `sizes`: none for `cpu`, and for `auto` when there is no adapter or a
-/// picture is too large for it; `gpu` refuses rather than fall back.
+/// of `sizes` handed as bytes: none for `cpu`, and for `auto` when there is
+/// no adapter or a picture is too large for it; `gpu` refuses rather than
+/// fall back.
 fn choose(
     renderer: Renderer,
     out: (u32, u32),
@@ -131,6 +167,29 @@ fn choose(
 /// Which frame a picture is: its stream, its pts, and the feed it came on.
 type FrameKey = (u32, i64, Option<(i64, i64)>);
 
+/// How a video input's frames are laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Layout {
+    Rgba,
+    /// Three planes, and how they read as colour.
+    Yuv420p(Colour),
+}
+
+impl Layout {
+    /// Each plane's width, height and texture format, for a picture of
+    /// `w` x `h`.
+    fn planes(self, (w, h): (u32, u32)) -> Vec<(u32, u32, wgpu::TextureFormat)> {
+        match self {
+            Layout::Rgba => vec![(w, h, wgpu::TextureFormat::Rgba8Unorm)],
+            Layout::Yuv420p(_) => {
+                let r8 = wgpu::TextureFormat::R8Unorm;
+                let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+                vec![(w, h, r8), (cw, ch, r8), (cw, ch, r8)]
+            }
+        }
+    }
+}
+
 pub struct Compose {
     v: Option<u32>,
     /// The streams of `inputs`, input 1 on.
@@ -142,9 +201,16 @@ pub struct Compose {
     watched: Vec<u32>,
     /// One frame of the clock, in its pts, where a frame does not say.
     step: Option<i64>,
+    /// Whether the video ports are held on the GPU: `renderer` was `gpu` or
+    /// `auto` when the instance opened, which is what `ffrwd:gpu/ports`
+    /// said for it.
+    on_gpu: bool,
+    /// Each input's layout, input 0 on; none for an input not read.
+    layouts: Vec<Option<Layout>>,
     /// The picture each input last handed over, kept so that a frame shown
     /// again (a held input repeating while its source is late) is the same
-    /// image: not fetched again, and not uploaded to the GPU again.
+    /// image: not fetched, uploaded or converted again. On the GPU it holds
+    /// no bytes, only the size and the blob id the renderer keys it by.
     pictures: Vec<Option<(FrameKey, RasterImageData)>>,
 }
 
@@ -166,6 +232,93 @@ fn watched(entries: &[Entry], held: &[u32]) -> Result<Vec<u32>, String> {
         .collect()
 }
 
+/// What a tick shows: the clock's frame and each held input's, and how to
+/// reach each one's picture.
+struct Shown<'a> {
+    tick: &'a Tick<'a>,
+    clocked: Option<(u32, Frame)>,
+    held: &'a [u32],
+    frames: Vec<Option<Frame>>,
+    layouts: &'a [Option<Layout>],
+    /// Whether pictures are taken as textures rather than fetched.
+    textures: bool,
+}
+
+impl Shown<'_> {
+    /// Input `input`'s picture this tick, `w` x `h`: the one kept in
+    /// `pictures` when it is the same frame, fetched or taken as textures
+    /// otherwise. None when the input shows nothing or its bytes are not a
+    /// picture of that size.
+    fn picture(
+        &self,
+        pictures: &mut [Option<(FrameKey, RasterImageData)>],
+        input: u32,
+        (w, h): (u32, u32),
+    ) -> Result<Option<Picture>, String> {
+        let Some((id, frame)) = (match input {
+            0 => self.clocked.clone(),
+            k => self
+                .held
+                .get(k as usize - 1)
+                .copied()
+                .zip(self.frames.get(k as usize - 1).cloned().flatten()),
+        }) else {
+            return Ok(None);
+        };
+        let Some(slot) = pictures.get_mut(input as usize) else {
+            return Ok(None);
+        };
+        let feed = self.tick.feed(id).map(|f| (f.start.at, f.start.first_pts));
+        let key = (id, frame.pts, feed);
+        let kept = slot
+            .as_ref()
+            .filter(|(kept, _)| *kept == key)
+            .map(|(_, image)| image.clone());
+        if !self.textures {
+            if let Some(image) = kept {
+                return Ok(Some(Picture::Bytes(image)));
+            }
+            let bytes = self.tick.fetch(id, frame.index);
+            if let Err(e) = ffrwd_frame::Rgba::new(&bytes, w as usize, h as usize) {
+                eprintln!("compose: input {input}: {e}");
+                return Ok(None);
+            }
+            let image = RasterImageData::new(w, h, Arc::new(bytes));
+            *slot = Some((key, image.clone()));
+            return Ok(Some(Picture::Bytes(image)));
+        }
+        let image = match kept {
+            Some(image) => image,
+            None => {
+                let image = RasterImageData::new(w, h, Arc::new(Vec::new()));
+                *slot = Some((key, image.clone()));
+                image
+            }
+        };
+        let layout = self
+            .layouts
+            .get(input as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("input {input} is not read"))?;
+        let mut planes = frames::planes(id, frame.index, &layout.planes((w, h)))
+            .map_err(|e| format!("input {input}: {e}"))?
+            .into_iter();
+        let mut next = || planes.next().expect("as many planes as the layout has");
+        Ok(Some(match layout {
+            Layout::Rgba => Picture::Rgba {
+                image,
+                texture: next(),
+            },
+            Layout::Yuv420p(colour) => Picture::Yuv420p {
+                image,
+                planes: [next(), next(), next()],
+                colour,
+            },
+        }))
+    }
+}
+
 impl Node for Compose {
     const NAME: &'static str = "compose";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -176,12 +329,17 @@ impl Node for Compose {
         let doc = params.document()?;
         Entry::parse_list(&params.presence)?;
         let clocked = bound.has("v");
+        frames::shaped(clocked);
+        let formats: &[&str] = match doc.renderer {
+            Renderer::Cpu => &[PIXEL_FORMAT],
+            Renderer::Auto | Renderer::Gpu => &GPU_PIXEL_FORMATS,
+        };
         let mut held = Input::video("inputs")
             .optional()
             .many()
             .anchor(Anchor::Tagged(TIMED_TAG.to_owned()))
             .lead(params.lead)
-            .pixel_formats(&[PIXEL_FORMAT]);
+            .pixel_formats(formats);
         if let Some(linger) = positive(params.linger) {
             held = held.linger(linger);
         }
@@ -215,7 +373,7 @@ impl Node for Compose {
         };
         if clocked {
             shape = shape
-                .input(Input::video("v").clock().pixel_formats(&[PIXEL_FORMAT]))
+                .input(Input::video("v").clock().pixel_formats(formats))
                 .output(video)
                 .one_to_one();
         } else {
@@ -242,22 +400,38 @@ impl Node for Compose {
             )
             .into());
         }
+        let on_gpu = doc.renderer != Renderer::Cpu;
         let mut sizes = Vec::new();
+        let mut layouts = Vec::new();
         for stream in v.iter().chain(held.iter()) {
             let video = stream
                 .video_format()
                 .ok_or_else(|| format!("`{}` is a video input", stream.port))?;
-            if video.pix_fmt != PIXEL_FORMAT {
-                return Err(format!(
-                    "compose takes {PIXEL_FORMAT} pictures, and `{}` is {}",
-                    stream.port, video.pix_fmt
-                )
-                .into());
-            }
+            let layout = match video.pix_fmt.as_str() {
+                PIXEL_FORMAT => Layout::Rgba,
+                "yuv420p" if on_gpu => {
+                    let color = video.color.clone().unwrap_or_default();
+                    Layout::Yuv420p(Colour::of(&color.space, &color.range))
+                }
+                other => {
+                    return Err(format!(
+                        "compose takes {} pictures, and `{}` is {other}",
+                        if on_gpu {
+                            "rgba or yuv420p"
+                        } else {
+                            PIXEL_FORMAT
+                        },
+                        stream.port
+                    )
+                    .into());
+                }
+            };
             sizes.push(Some((video.width, video.height)));
+            layouts.push(Some(layout));
         }
         if v.is_none() {
             sizes.insert(0, None);
+            layouts.insert(0, None);
         }
         let out = given_size(&doc)
             .or(sizes[0])
@@ -282,7 +456,13 @@ impl Node for Compose {
         let renderer = doc.renderer;
         let pictures = vec![None; sizes.len()];
         let mut session = Session::with_sizes(doc, out, sizes.clone());
-        session.set_gpu(choose(renderer, out, &sizes, summary)?);
+        // Pictures held on the GPU are drawn from their textures, not the
+        // atlas, so their size is no bound.
+        let atlas: &[Option<(u32, u32)>] = if on_gpu { &[] } else { &sizes };
+        session.set_gpu(choose(renderer, out, atlas, summary)?);
+        if session.gpu().is_none() {
+            refuse_yuv_on_the_cpu(&layouts)?;
+        }
         for e in session.take_errors() {
             eprintln!("compose: row error: {e}");
         }
@@ -300,9 +480,11 @@ impl Node for Compose {
                 session.params.rows.len(),
                 entries.len(),
                 if entries.len() == 1 { "y" } else { "ies" },
-                match session.gpu() {
-                    Some(gpu) => format!("on the GPU ({})", gpu.adapter()),
-                    None => "on the CPU".to_owned(),
+                match (session.gpu(), on_gpu) {
+                    (Some(gpu), true) =>
+                        format!("on the GPU ({}), the video ports held there", gpu.adapter()),
+                    (Some(gpu), false) => format!("on the GPU ({})", gpu.adapter()),
+                    (None, _) => "on the CPU".to_owned(),
                 },
                 started.elapsed().as_secs_f64() * 1e3
             );
@@ -315,6 +497,8 @@ impl Node for Compose {
             presence: Presence::new(entries),
             watched,
             step,
+            on_gpu,
+            layouts,
             pictures,
         })
     }
@@ -330,8 +514,15 @@ impl Node for Compose {
             let gpu = match (renderer, self.session.compositor().take_gpu()) {
                 (Renderer::Cpu, _) => None,
                 (_, Some(gpu)) => Some(gpu),
-                (_, None) => choose(renderer, self.session.size(), self.session.sizes(), summary)?,
+                (_, None) => {
+                    let sizes = self.session.sizes().to_vec();
+                    let atlas: &[Option<(u32, u32)>] = if self.on_gpu { &[] } else { &sizes };
+                    choose(renderer, self.session.size(), atlas, summary)?
+                }
             };
+            if gpu.is_none() {
+                refuse_yuv_on_the_cpu(&self.layouts)?;
+            }
             self.session.set_gpu(gpu);
         }
         self.session.set_params(doc);
@@ -383,41 +574,47 @@ impl Node for Compose {
             self.session.schedule(rows);
         }
 
-        let shown: Vec<_> = self.held.iter().map(|id| tick.frame(*id)).collect();
+        let showing: Vec<_> = self.held.iter().map(|id| tick.frame(*id)).collect();
         let mut absent = if clocked.is_some() { 0 } else { bit(0) };
-        for (k, frame) in shown.iter().enumerate() {
+        for (k, frame) in showing.iter().enumerate() {
             if frame.is_none() {
                 absent |= bit(k as u32 + 1);
             }
         }
-        let (held, pictures) = (&self.held, &mut self.pictures);
-        let mut fetch = |input: u32, (w, h): (u32, u32)| -> Option<RasterImageData> {
-            let (id, frame) = match input {
-                0 => clocked.as_ref().map(|(v, frame)| (*v, frame.clone()))?,
-                k => held
-                    .get(k as usize - 1)
-                    .copied()
-                    .zip(shown.get(k as usize - 1).cloned().flatten())?,
-            };
-            let feed = tick.feed(id).map(|f| (f.start.at, f.start.first_pts));
-            let key = (id, frame.pts, feed);
-            let slot = pictures.get_mut(input as usize)?;
-            if let Some((kept, image)) = slot
-                && *kept == key
-            {
-                return Some(image.clone());
-            }
-            let bytes = tick.fetch(id, frame.index);
-            if let Err(e) = ffrwd_frame::Rgba::new(&bytes, w as usize, h as usize) {
-                eprintln!("compose: input {input}: {e}");
-                return None;
-            }
-            let image = RasterImageData::new(w, h, Arc::new(bytes));
-            *slot = Some((key, image.clone()));
-            Some(image)
+        let shown = Shown {
+            tick,
+            clocked: clocked.clone(),
+            held: &self.held,
+            frames: showing,
+            layouts: &self.layouts,
+            textures: self.on_gpu && self.session.gpu().is_some(),
         };
-        let made = self.session.frame_pictures(t, absent, &mut fetch);
+        let pictures = &mut self.pictures;
+        let mut failed = None;
+        let made = self.session.frame_with(t, absent, &mut |input, size| {
+            shown.picture(pictures, input, size).unwrap_or_else(|e| {
+                failed.get_or_insert(e);
+                None
+            })
+        });
+        if let Some(e) = failed {
+            return Err(e.into());
+        }
         match made {
+            Made::Same(k) if shown.textures && self.layouts[k as usize] != Some(Layout::Rgba) => {
+                // A yuv picture cannot leave on the rgba output as it is: it
+                // leaves converted, in a texture of its own.
+                let size = self.session.sizes()[k as usize].ok_or("a bypassed input is read")?;
+                let picture = shown
+                    .picture(&mut self.pictures, k, size)?
+                    .ok_or("a bypassed input shows a picture")?;
+                let frame = self
+                    .session
+                    .gpu_mut()
+                    .and_then(|gpu| gpu.frame_of(k, &picture))
+                    .ok_or("a picture held on the GPU is a texture")?;
+                frames::emit("video", pts, duration, frame)?;
+            }
             Made::Same(0) => {
                 if let Some((v, frame)) = &clocked {
                     out.pass("video", *v, frame)?;
@@ -425,11 +622,21 @@ impl Node for Compose {
             }
             Made::Same(k) => {
                 let k = k as usize - 1;
-                if let (Some(id), Some(Some(frame))) = (self.held.get(k), shown.get(k)) {
+                if let (Some(id), Some(Some(frame))) = (self.held.get(k), shown.frames.get(k)) {
                     out.same("video", pts, duration, *id, frame.index)?;
                 }
             }
             Made::New(bytes) => out.frame("video", pts, duration, bytes)?,
+            Made::Rendered(frame) if self.on_gpu => frames::emit("video", pts, duration, frame)?,
+            Made::Rendered(frame) => {
+                // The GPU renderer was asked for after the instance opened,
+                // with its ports in host memory.
+                let mut bytes = Vec::new();
+                if let Some(gpu) = self.session.gpu_mut() {
+                    gpu.read_back(&frame, &mut bytes);
+                }
+                out.frame("video", pts, duration, bytes)?;
+            }
         }
         for e in self.session.take_errors() {
             eprintln!("compose: row error: {e}");
@@ -443,6 +650,21 @@ impl Node for Compose {
             eprintln!("compose {line}");
         }
         Ok(())
+    }
+}
+
+/// The CPU renderer takes rgba pictures alone: an input held on the GPU as
+/// yuv420p needs the GPU renderer.
+fn refuse_yuv_on_the_cpu(layouts: &[Option<Layout>]) -> Result<(), String> {
+    match layouts
+        .iter()
+        .position(|l| matches!(l, Some(Layout::Yuv420p(_))))
+    {
+        Some(k) => Err(format!(
+            "input {k} is yuv420p, which the GPU renderer converts and the CPU renderer does \
+             not take: compose renders on the CPU here"
+        )),
+        None => Ok(()),
     }
 }
 

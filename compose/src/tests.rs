@@ -308,3 +308,36 @@ fn renderer_gpu_with_no_adapter_is_refused_and_cpu_never_asks() {
     assert!(err.contains("renderer => 'gpu'"), "{err}");
     assert!(shape(r#"{"renderer":"vulkan"}"#, &["v"]).is_err());
 }
+
+#[test]
+fn on_the_gpu_the_video_inputs_take_yuv420p_too() {
+    for (renderer, formats) in [
+        ("cpu", &["rgba"][..]),
+        ("auto", &["rgba", "yuv420p"][..]),
+        ("gpu", &["rgba", "yuv420p"][..]),
+    ] {
+        let s = shape(&format!(r#"{{"renderer":"{renderer}"}}"#), &["v", "inputs"]).unwrap();
+        for port in ["v", "inputs"] {
+            assert_eq!(
+                s.find_input(port).unwrap().accepts.pixel_formats,
+                formats,
+                "{port} with renderer => '{renderer}'"
+            );
+        }
+        assert_eq!(s.outputs[0].name, "video");
+    }
+}
+
+#[test]
+fn a_yuv420p_input_is_refused_where_the_cpu_renders() {
+    // The native build has no GPU, so `auto` renders on the CPU, which
+    // takes rgba alone; `cpu` does not offer yuv420p at all.
+    let bound = vec![BoundStream::video("v", 0, W, H, "yuv420p", TB).rate(Rational::new(30, 1))];
+    let p = params(FULL, r#""renderer":"auto""#);
+    let err = match Harness::<Compose>::new(&p, bound.clone()) {
+        Ok(_) => panic!("a yuv420p input opened on the CPU"),
+        Err(e) => e,
+    };
+    assert!(err.contains("yuv420p"), "{err}");
+    assert!(Harness::<Compose>::new(&params(FULL, ""), bound).is_err());
+}
