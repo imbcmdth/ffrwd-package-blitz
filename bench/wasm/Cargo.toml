@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 blitz-bench-doc = { path = "../doc" }
 blitz-bench-harness = { path = "../harness" }
-wgpu-wasi-webgpu = { path = "../../backend" }
+wgpu-wasi-webgpu = { path = "../../../wgpu-wasi-webgpu" }
 wgpu = { version = "29", default-features = false, features = ["wgsl"] }
 ffrwd-node.workspace = true
 serde.workspace = true

@@ -17,8 +17,6 @@ members = [
     "bench/harness",
     # Step C: the harness as a wasm source node on wgpu-wasi-webgpu.
     "bench/wasm",
-    # wgpu over wasi:webgpu, for the wasm run of the experiment; empty on the native target.
-    "backend",
 ]
 resolver = "2"
 

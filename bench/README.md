@@ -28,7 +28,8 @@ The crates and scripts:
   the native bench's dump of the same frame.
 - `bench/wasm` (`blitz-bench-compose`): step C, the harness as a source
   node in the shape of `page`, built for wasm32-wasip2 on
-  `../backend` (wgpu over wasi:webgpu) and run under `ffrwd-wasm` with a
+  `wgpu-wasi-webgpu` (wgpu over wasi:webgpu, a repository of its own checked
+  out beside this one) and run under `ffrwd-wasm` with a
   `-gpu` grant; rows on `[@rows=...]`, the picture on `video` only when
   mapped (a readback). It ends itself after `frames`.
 - `run-all.ps1` and `run-all.sh` run step A at every variant and N of 2, 4
