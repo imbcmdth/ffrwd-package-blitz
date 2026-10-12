@@ -135,7 +135,27 @@ variable, and a long document reaches the sidecar in a file of its own.
   with nothing visible over it, the module hands that input back without
   copying it (`bypass`): `v` while the document is idle, an ad while it
   fills the screen. It decides from the paint commands, before any pixels
-  arrive.
+  arrive. An input in yuv420p cannot leave on the rgba output as it is:
+  on the CPU it is fetched, converted and handed on as a new frame, and on
+  the GPU converted on the device.
+
+### Pixel formats
+
+`v` and `inputs` take rgba or yuv420p, whatever `renderer` says, and list
+rgba first, which is what the compiler puts on the wire: ffmpeg converts a
+decoded picture to rgba before it reaches the module. A yuv420p picture
+handed to the module as it is (by `ffrwd-wasm` given a yuv420p stream, as
+the tests do) is converted to straight rgba in the module, on the CPU path
+before it is drawn, and on the GPU path on the device. Both read the
+stream's colour the same way: BT.709 when its matrix is `bt709` and BT.601
+otherwise (as swscale reads a stream that does not say), full range when
+its range is `pc` and limited otherwise. Each chroma sample covers the two
+by two pixels it is coded for, as swscale's default conversion places it.
+On the CPU the conversion is ffrwd-frame's, within one level of swscale
+computed exactly and within three of swscale's default fast path. rgba is
+first because on the CPU path converting costs the module more than the
+smaller wire saves it; see
+[The CPU path's output buffer and yuv420p](#the-cpu-paths-output-buffer-and-yuv420p).
 
 ### Held inputs
 
@@ -275,12 +295,12 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `width`, `height` | number | `v`'s | The canvas, px. Both given, the output is that size. |
 | `css_width`, `css_height` | number | the canvas's | The design size, CSS px: the document's viewport. One side alone takes the canvas's aspect for the other. |
 | `fit` | text | `'contain'` | How the design fills the canvas: `'contain'` (uniform scale, centred, black bars) or `'stretch'` (each axis on its own). |
-| `bypass` | boolean | `true` | Hand an input back uncopied on frames that are nothing but it. |
+| `bypass` | boolean | `true` | Hand an input back uncopied on frames that are nothing but it. A yuv420p input leaves converted, as a new frame. |
 | `port` | number, or a list of them | none | `compose`: the loopback ports the held inputs are given on, one each in `inputs` order; written by the compiler for laterals. |
 | `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
-| `renderer` | text | `'cpu'` | Who rasterises the document: `'cpu'` (no adapter asked for), `'auto'` (the GPU when the host has an adapter, the CPU otherwise) or `'gpu'` (refused with no adapter). See [The GPU path](#the-gpu-path). |
+| `renderer` | text | `'cpu'` | Who rasterises the document: `'cpu'` (no adapter asked for), `'auto'` (the GPU when the host has an adapter, the CPU otherwise) or `'gpu'` (refused with no adapter). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |
 | `fps` | number | `30` | `page`: frames a second. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |
 
@@ -317,7 +337,7 @@ texture of the output's size. The texture is copied into a buffer, the
 buffer is mapped, and its bytes become the frame the module hands on:
 RGBA8 at the output's size, premultiplied where the page is translucent,
 as the CPU path's frames are. With no adapter, and with the default
-`renderer => 'cpu'`, everything is as in 0.2, on vello_cpu.
+`renderer => 'cpu'`, the document is rasterised as in 0.2, on vello_cpu.
 
 Only the rasteriser changes. The document, the change rows, presence, the
 choice of which inputs a frame draws and the bypass are the same on both
@@ -443,6 +463,56 @@ the frame back).
 At two workers the GPU path is the faster at 4K and the slower at 1080p;
 it also leaves the CPU's cores free for other work, such as the encoder.
 
+### The CPU path's output buffer and yuv420p
+
+The same example and harness as above, on the CPU path at `-jobs 1`, with
+the programme and the ad fed as rgba or as yuv420p (untagged, so read as
+BT.601 limited range). Each figure is the median of three runs, taken with
+no build or other sidecar running beside them: before each run the
+harness waited until no
+`cargo`, `rustc`, `link` or `ffmpeg` process was running and the CPU's
+load was under 10%, sampled the process list every 2 s during the run, and
+ran again any run during which a compiler, ffmpeg or a second sidecar had
+appeared. The time a frame is the module's own mean from its
+`log => 'summary'` line, over all 360 frames and over the 217 it
+rendered; the parts of a rendered frame are the means of its
+`log => 'frame'` lines.
+
+| output | module | fed | a frame | a rendered frame | fetching the pictures | outside painting and rasterising | a frame handed back | frames a second |
+|---|---|---|---|---|---|---|---|---|
+| 1080p | 0.3.0 | rgba | 8.40 ms | 13.89 ms | 1.81 ms | 0.33 ms | 0.06 ms | 87.1 |
+| 1080p | one buffer, copied out | rgba | 8.59 ms | 14.20 ms | 1.80 ms | 0.41 ms | 0.07 ms | 84.8 |
+| 1080p | with the yuv420p conversion | rgba | 8.44 ms | 13.96 ms | 1.89 ms | 0.34 ms | 0.06 ms | 87.1 |
+| 1080p | with the yuv420p conversion | yuv420p | 10.56 ms | 15.68 ms | 4.67 ms | 0.17 ms | 2.82 ms | 81.7 |
+| 4K | 0.3.0 | rgba | 44.43 ms | 73.64 ms | 3.74 ms | 0.74 ms | 0.10 ms | 18.4 |
+| 4K | one buffer, copied out | rgba | 44.25 ms | 73.34 ms | 3.76 ms | 1.74 ms | 0.10 ms | 18.5 |
+| 4K | with the yuv420p conversion | rgba | 43.73 ms | 72.49 ms | 3.74 ms | 0.76 ms | 0.10 ms | 18.7 |
+| 4K | with the yuv420p conversion | yuv420p | 51.61 ms | 78.40 ms | 13.82 ms | 0.67 ms | 10.97 ms | 17.4 |
+
+- **The output buffer.** Each rendered frame on the CPU path is a new
+  buffer, handed to the host with the frame, since the host takes what
+  the module emits. Keeping one buffer for the instance and copying each
+  frame out of it costs a copy where the new buffer costs only zeroing:
+  the time outside painting and rasterising, which holds either, is 1.74
+  ms a 4K frame against 0.74 ms, and 0.41 ms against 0.33 ms at 1080p. The
+  module keeps a new buffer a frame. The totals differ by less than the
+  rasteriser's own variation from run to run (about 5%).
+- **yuv420p.** Fetching a 4K programme and a 1080p ad as yuv420p and
+  converting them takes 13.8 ms where fetching them as rgba takes 3.7 ms,
+  and a frame handed back takes 11.0 ms where an rgba one is passed on
+  uncopied; painting takes 4.8 ms against 8.0 ms, which takes back part
+  of it. Over the run the module spends 51.6 ms a 4K frame on yuv420p
+  against 43.7 ms on rgba, and the sidecar delivers 17.4 frames a second
+  against 18.7. On the wire a
+  picture is three eighths of the bytes, and ffmpeg upstream is spared
+  its conversion to rgba: 15 to 19 ms of CPU a 4K frame over its threads,
+  about 1.2 ms of wall time (ffmpeg 9.0.1 converting lavfi testsrc2, timed
+  with `-benchmark`). That is more CPU than the module's conversion takes,
+  but it runs on ffmpeg's threads beside the module, while the module's
+  conversion is in its frame, and with one worker the module's frame is
+  what limits the rate. So `v` and `inputs` list rgba first, and yuv420p
+  is taken when a picture comes in that format.
+
 The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
 
 ## Limitations and workarounds
@@ -518,10 +588,19 @@ The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
      written in the call (`port => 9100`) is refused when the sidecar
      opens the module: the host reads a parameter whose schema allows two
      types as text.
-   - **A feed by port into an rgba programme is refused** by the host
-     ("yuv in the "gbr" matrix is not converted here"), even one sending
-     rgba: the host tags the rgba programme with a colour it then cannot
-     convert to. Held streams from the query are unaffected.
+   - **A yuv feed by port in a matrix the host does not convert is
+     refused** ("yuv in the "gbr" matrix is not converted here"). The host
+     conforms a feed by port to the held input's format, rgba, and
+     converts a yuv420p feeder from its own matrix: BT.601 (`bt470bg`,
+     `smpte170m`), BT.709, BT.2020 non-constant luminance, FCC and SMPTE
+     240M are converted, and any other (`gbr`, `bt2020c`, `ycgco`,
+     `ictcp`) is refused. An rgba feeder is passed through with no matrix
+     at all. Held streams from the query are converted by ffmpeg and are
+     unaffected.
+   - **A yuv420p picture in a matrix other than BT.709 is read as
+     BT.601** by the module, on either path, when one reaches it as
+     yuv420p (see [Pixel formats](#pixel-formats)). Streams from the query
+     reach it as rgba, converted by ffmpeg in their own matrix.
    - **A sidecar built without GPU support refuses this module**, whether
      or not the machine has a GPU: the module imports wasi:webgpu, and
      such a sidecar does not host it. There is no fallback to the CPU in
@@ -566,13 +645,20 @@ images. They take a few seconds once built.
 sidecar, `tests/stream_rows2.sql` does it with a second picture held, and
 `tests/presence.sql` drives a document from a held input's feed.
 
+`compose/src/tests.rs` also feeds yuv420p pictures to the CPU path in
+each matrix and range a stream may name, handed back whole, drawn by the
+document and held, and compares the module's conversion with ffmpeg's
+(skipped where there is no ffmpeg on the PATH).
+
 Two tests cover the GPU path. `core/tests/gpu.rs` renders the lbar
 document, a translucent page, a picture with transparency and a held
 picture on vello_cpu and on vello_hybrid with wgpu's native backends, and
 checks that a held picture is uploaded once. `compose/tests/sidecar.rs`
 runs the lbar example through the sidecar with `renderer => 'gpu'` and
 `renderer => 'cpu'` and compares the frames (see
-[How close the two paths are](#how-close-the-two-paths-are)). It needs
+[How close the two paths are](#how-close-the-two-paths-are)), and runs it
+on the CPU from yuv420p and from the rgba ffmpeg converts the same planes
+to, and compares those. It needs
 the module built first and finds the sidecar through `FFRWD_WASM`, or
 else in an ffrwd-cli checkout beside this repository
 (`../ffrwd-cli/sidecar/target/release/ffrwd-wasm`); the native test needs
