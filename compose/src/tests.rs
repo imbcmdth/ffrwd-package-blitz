@@ -311,15 +311,15 @@ fn renderer_gpu_with_no_adapter_is_refused_and_cpu_never_asks() {
 
 #[test]
 fn the_video_inputs_take_yuv420p_on_every_renderer() {
-    // rgba first, which the compiler puts on the wire.
-    for renderer in ["cpu", "auto", "gpu"] {
+    // The first is what the compiler puts on the wire: yuv420p on the CPU,
+    // rgba on the GPU.
+    for (renderer, first) in [("cpu", "yuv420p"), ("auto", "rgba"), ("gpu", "rgba")] {
         let s = shape(&format!(r#"{{"renderer":"{renderer}"}}"#), &["v", "inputs"]).unwrap();
         for port in ["v", "inputs"] {
-            assert_eq!(
-                s.find_input(port).unwrap().accepts.pixel_formats,
-                ["rgba", "yuv420p"],
-                "{port} with renderer => '{renderer}'"
-            );
+            let formats = &s.find_input(port).unwrap().accepts.pixel_formats;
+            assert_eq!(formats.len(), 2, "{port} with renderer => '{renderer}'");
+            assert_eq!(formats[0], first, "{port} with renderer => '{renderer}'");
+            assert!(formats.iter().any(|f| f == "rgba") && formats.iter().any(|f| f == "yuv420p"));
         }
         assert_eq!(s.outputs[0].name, "video");
     }

@@ -10,12 +10,13 @@
 //! record of each feed, so a call is pure and a host spreads it over
 //! workers, each folding the rows of the ticks the others rendered.
 //!
-//! The document is rasterised on the CPU by default (`renderer` `cpu`), and
-//! on the GPU through wgpu over wasi:webgpu with `renderer` `gpu`, or `auto`
-//! when the host has one. On the GPU the video ports are held there too
-//! (`ffrwd:gpu`): each input picture is drawn from the host's texture, a
-//! yuv420p one converted on the device first, and the frame is handed back
-//! as a texture, so no picture's bytes cross into the module or out of it.
+//! The document is rasterised on the GPU through wgpu over wasi:webgpu when
+//! the host has one (`renderer` `auto`, the default, or `gpu`), and on the
+//! CPU otherwise or with `renderer` `cpu`. On the GPU the video ports are
+//! held there too (`ffrwd:gpu`): each input picture is drawn from the
+//! host's texture, a yuv420p one converted on the device first, and the
+//! frame is handed back as a texture, so no picture's bytes cross into the
+//! module or out of it.
 //! On the CPU a yuv420p picture is fetched as it is and converted to rgba
 //! here, in its stream's matrix and range.
 
@@ -64,7 +65,7 @@ mod frames {
     }
 }
 
-const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"cpu"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
+const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
 /// What `changes` reads: rows with a selector. The rest of a row is read
 /// when it is applied, and a row that does not read is logged.
@@ -79,12 +80,18 @@ const PIXEL_FORMAT: &str = "rgba";
 
 const YUV420P: &str = "yuv420p";
 
-/// What a video input is taken as, on either renderer: rgba, or yuv420p,
-/// which the module converts (on the device when its frames are held
-/// there). The compiler puts the first on the wire. rgba is first: on the
-/// CPU, converting a 4K picture here costs the module about 10 ms more
-/// than fetching it as rgba does.
-const PIXEL_FORMATS: [&str; 2] = [PIXEL_FORMAT, YUV420P];
+/// What a video input is taken as: rgba, or yuv420p, which the module
+/// converts (on the device when its frames are held there). The compiler
+/// puts the first on the wire. On the CPU yuv420p is first: the module's
+/// conversion spreads over the workers, where ffmpeg's conversion to rgba
+/// upstream of the sidecar held a 4K run to 23 frames a second against 30.
+/// On the GPU rgba is first, the decoder's pictures made rgba in one pass.
+fn pixel_formats(renderer: Renderer) -> [&'static str; 2] {
+    match renderer {
+        Renderer::Cpu => [YUV420P, PIXEL_FORMAT],
+        _ => [PIXEL_FORMAT, YUV420P],
+    }
+}
 
 #[derive(Deserialize)]
 pub struct Params {
@@ -370,7 +377,7 @@ impl Node for Compose {
             .many()
             .anchor(Anchor::Tagged(TIMED_TAG.to_owned()))
             .lead(params.lead)
-            .pixel_formats(&PIXEL_FORMATS);
+            .pixel_formats(&pixel_formats(doc.renderer));
         if let Some(linger) = positive(params.linger) {
             held = held.linger(linger);
         }
@@ -404,7 +411,11 @@ impl Node for Compose {
         };
         if clocked {
             shape = shape
-                .input(Input::video("v").clock().pixel_formats(&PIXEL_FORMATS))
+                .input(
+                    Input::video("v")
+                        .clock()
+                        .pixel_formats(&pixel_formats(doc.renderer)),
+                )
                 .output(video)
                 .one_to_one();
         } else {
