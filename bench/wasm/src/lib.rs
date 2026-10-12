@@ -63,7 +63,12 @@ impl Node for Bench {
         let (w, h) = (params.width, params.height);
         Ok(Shape::new()
             .rate(Rational::approximate(params.fps, 1001))
-            .output(Output::video("video").size(w, h).pixel_format("rgba").row(0))
+            .output(
+                Output::video("video")
+                    .size(w, h)
+                    .pixel_format("rgba")
+                    .row(0),
+            )
             .relation_row(&format!(r#"{{"width":{w},"height":{h}}}"#))
             // One instance: a bench of the single-threaded guest, not spread
             // over workers.

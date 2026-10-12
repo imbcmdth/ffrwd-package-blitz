@@ -42,7 +42,12 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         match k.as_str() {
-            "--n" => a.config.n = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
+            "--n" => {
+                a.config.n = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
             "--variant" => {
                 a.config.variant = it
                     .next()
@@ -51,7 +56,12 @@ fn parse_args() -> Args {
                     .unwrap_or_else(|| usage())
             }
             "--all-4k" => a.config.all_4k = true,
-            "--frames" => a.config.frames = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage()),
+            "--frames" => {
+                a.config.frames = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
             "--backend" => {
                 a.backends = match it.next().as_deref() {
                     Some("dx12") => wgpu::Backends::DX12,
@@ -62,7 +72,10 @@ fn parse_args() -> Args {
                 }
             }
             "--dump" => {
-                let frame = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
+                let frame = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage());
                 let path = it.next().unwrap_or_else(|| usage());
                 a.dump = Some((frame, path));
             }
@@ -77,13 +90,16 @@ fn parse_args() -> Args {
 
 #[cfg(windows)]
 fn peak_rss() -> Option<u64> {
-    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     // SAFETY: a zeroed counters struct with its size set is what the call asks for.
     unsafe {
         let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
         c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        (K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) != 0).then_some(c.PeakWorkingSetSize as u64)
+        (K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) != 0)
+            .then_some(c.PeakWorkingSetSize as u64)
     }
 }
 

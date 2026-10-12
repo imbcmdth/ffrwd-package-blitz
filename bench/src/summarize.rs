@@ -34,7 +34,12 @@ fn read_run(path: &Path) -> Option<Run> {
             rows.push(row);
         }
     }
-    Some(Run { file: path.display().to_string(), meta, rows, end })
+    Some(Run {
+        file: path.display().to_string(),
+        meta,
+        rows,
+        end,
+    })
 }
 
 fn percentile(v: &mut [f64], p: f64) -> f64 {
@@ -108,12 +113,20 @@ fn main() {
         println!("The first {skip} frame(s) of each run are left out of the statistics.");
     }
     println!();
-    println!("Times in ms, median / p99. cpu = resolve + plan + paint_cmds + encode. submit+wait is the wall clock from submit to the queue idle. upload and wit are MB a frame (mean). miss = frames over 16.67 ms. fps = frames over the run's wall time.");
+    println!(
+        "Times in ms, median / p99. cpu = resolve + plan + paint_cmds + encode. submit+wait is the wall clock from submit to the queue idle. upload and wit are MB a frame (mean). miss = frames over 16.67 ms. fps = frames over the run's wall time."
+    );
     println!();
-    println!("| step | N | variant | inputs | frames | resolve | plan | paint_cmds | encode | cpu | gpu | submit+wait | readback | frame | fps | miss | upload | wit | peak MB |");
+    println!(
+        "| step | N | variant | inputs | frames | resolve | plan | paint_cmds | encode | cpu | gpu | submit+wait | readback | frame | fps | miss | upload | wit | peak MB |"
+    );
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for run in &runs {
-        let rows: &[Row] = if run.rows.len() > skip { &run.rows[skip..] } else { &run.rows };
+        let rows: &[Row] = if run.rows.len() > skip {
+            &run.rows[skip..]
+        } else {
+            &run.rows
+        };
         if rows.is_empty() {
             eprintln!("summarize: {} has no rows", run.file);
             continue;
@@ -124,7 +137,10 @@ fn main() {
         let miss = rows.iter().filter(|r| r.frame_us > 1e6 / 60.0).count();
         let upload = rows.iter().map(|r| r.upload_bytes as f64).sum::<f64>() / frames as f64 / 1e6;
         let wit: Option<f64> = {
-            let v: Vec<f64> = rows.iter().filter_map(|r| r.wit_bytes.map(|b| b as f64)).collect();
+            let v: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| r.wit_bytes.map(|b| b as f64))
+                .collect();
             (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64 / 1e6)
         };
         let peak = run
@@ -133,7 +149,11 @@ fn main() {
             .and_then(|e| e.peak_rss_bytes)
             .map(|b| format!("{}", b / (1 << 20)))
             .unwrap_or("?".into());
-        let inputs = if run.meta.all_4k { "all 4K" } else { "4K + 1080p" };
+        let inputs = if run.meta.all_4k {
+            "all 4K"
+        } else {
+            "4K + 1080p"
+        };
         let variant_name = blitz_bench_doc::Variant::from_number(run.meta.variant)
             .map(|v| v.name())
             .unwrap_or("?");
@@ -176,7 +196,11 @@ fn print_hashes(runs: &[Run]) {
                     run.meta.step,
                     run.meta.n,
                     run.meta.variant,
-                    if run.meta.all_4k { "all 4K" } else { "4K + 1080p" },
+                    if run.meta.all_4k {
+                        "all 4K"
+                    } else {
+                        "4K + 1080p"
+                    },
                     row.frame,
                     h
                 ));
@@ -187,7 +211,9 @@ fn print_hashes(runs: &[Run]) {
         return;
     }
     println!();
-    println!("Pixel hashes (FNV-1a of the frame read back), for checking one renderer against another:");
+    println!(
+        "Pixel hashes (FNV-1a of the frame read back), for checking one renderer against another:"
+    );
     println!();
     println!("| step | N | variant | inputs | frame | hash |");
     println!("|---|---|---|---|---|---|");

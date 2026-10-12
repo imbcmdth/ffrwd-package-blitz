@@ -68,11 +68,7 @@ impl Variant {
 /// Input `i`'s picture size: input 0 at 4K, the rest at 1080p unless every
 /// input is 4K.
 pub fn input_size(i: u32, all_4k: bool) -> (u32, u32) {
-    if i == 0 || all_4k {
-        OUT
-    } else {
-        (1920, 1080)
-    }
+    if i == 0 || all_4k { OUT } else { (1920, 1080) }
 }
 
 /// The lbar document generalised to `n` inputs, `n` from 1 to 64: input 0
@@ -176,7 +172,7 @@ pub fn gradient(w: u32, h: u32, i: u32) -> Vec<u8> {
     for y in 0..hu {
         let g = ((y * 255) / hu.max(1)) as u8;
         let row = &mut v[y * wu * 4..(y + 1) * wu * 4];
-        for (x, px) in row.chunks_exact_mut(4).enumerate() {
+        for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px[0] = ((x * 255) / wu.max(1)) as u8;
             px[1] = g;
             px[2] = b;

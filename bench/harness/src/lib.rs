@@ -16,7 +16,9 @@ use compose_core::{Compositor, Fit, Geometry, RasterImageData};
 use kurbo::{Affine, Rect};
 use peniko::{Color, Fill};
 use rustc_hash::FxHashMap;
-use vello_hybrid::{RenderSettings, RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings};
+use vello_hybrid::{
+    RenderSettings, RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings,
+};
 use wgpu_context::DeviceHandle;
 
 /// A frame's picture: the bytes and the blob the document is handed, kept
@@ -92,16 +94,21 @@ impl Harness {
         meta.driver_info = info.driver_info.clone();
         meta.device_type = format!("{:?}", info.device_type);
         let have = adapter.features();
-        let timestamps =
-            have.contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let timestamps = have.contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        );
         let mut features = wgpu::Features::empty();
-        for f in [wgpu::Features::CLEAR_TEXTURE, wgpu::Features::PIPELINE_CACHE] {
+        for f in [
+            wgpu::Features::CLEAR_TEXTURE,
+            wgpu::Features::PIPELINE_CACHE,
+        ] {
             if have.contains(f) {
                 features |= f;
             }
         }
         if timestamps {
-            features |= wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+            features |=
+                wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
             meta.gpu_timing = GpuTiming::Timestamp;
         } else {
             meta.gpu_timing = GpuTiming::Wall;
@@ -199,9 +206,12 @@ impl Harness {
             Fit::Contain,
         );
         let t_build = Instant::now();
-        let comp = Compositor::with_sizes(&html, geometry, sizes.iter().map(|s| Some(*s)).collect());
-        meta.notes
-            .push(format!("document built in {:.1} ms", t_build.elapsed().as_secs_f64() * 1e3));
+        let comp =
+            Compositor::with_sizes(&html, geometry, sizes.iter().map(|s| Some(*s)).collect());
+        meta.notes.push(format!(
+            "document built in {:.1} ms",
+            t_build.elapsed().as_secs_f64() * 1e3
+        ));
         let pictures: Vec<Picture> = sizes
             .iter()
             .enumerate()
@@ -314,13 +324,16 @@ impl Harness {
                     label: Some("free atlas"),
                 });
             for id in self.to_destroy.drain(..) {
-                self.renderer.destroy_image(&mut self.resources, &mut clears, id);
+                self.renderer
+                    .destroy_image(&mut self.resources, &mut clears, id);
             }
             self.queue.submit([clears.finish()]);
         }
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
         if let Some(qs) = &self.query_set {
             encoder.write_timestamp(qs, 0);
         }
@@ -335,8 +348,12 @@ impl Harness {
                 &mut encoder,
                 &mut self.cache,
             );
-            let mut painter =
-                VelloHybridScenePainter::new(&mut self.scene, images, &mut self.texture_bindings, &self.device_handle);
+            let mut painter = VelloHybridScenePainter::new(
+                &mut self.scene,
+                images,
+                &mut self.texture_bindings,
+                &self.device_handle,
+            );
             let s = Instant::now();
             painter.fill(
                 Fill::NonZero,
@@ -348,7 +365,12 @@ impl Harness {
             self.comp.paint_into(&mut painter);
             row.paint_cmds_us = us(s);
         }
-        let gained: Vec<u64> = self.cache.keys().copied().filter(|k| !known.contains(k)).collect();
+        let gained: Vec<u64> = self
+            .cache
+            .keys()
+            .copied()
+            .filter(|k| !known.contains(k))
+            .collect();
         for k in &gained {
             row.upload_bytes += self.blob_bytes.get(k).copied().unwrap_or(0);
         }
@@ -361,7 +383,10 @@ impl Harness {
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &RenderSize { width: w, height: h },
+                &RenderSize {
+                    width: w,
+                    height: h,
+                },
                 &self.target_view,
                 &TextureBindings::new(),
             )
@@ -401,18 +426,26 @@ impl Harness {
         self.queue.submit([encoder.finish()]);
         row.submit_us = us(s);
         let s = Instant::now();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
         row.wait_us = us(s);
         if self.query_set.is_some() {
             // Mapping blocks until the GPU is done where `poll` does not
             // (the wasi host), so the wait is counted here too.
             let s = Instant::now();
-            self.ts_read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            self.ts_read
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |_| {});
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
             let stamps: Vec<u64> = {
                 let m = self.ts_read.slice(..).get_mapped_range();
-                m.chunks_exact(8)
-                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                m.as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| u64::from_le_bytes(*c))
                     .collect()
             };
             self.ts_read.unmap();
@@ -425,8 +458,12 @@ impl Harness {
         if read_now {
             // Today's output path: the frame's bytes into a Vec of the guest's.
             let s = Instant::now();
-            self.readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            self.readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |_| {});
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("poll");
             let bytes: Vec<u8> = self.readback.slice(..).get_mapped_range().to_vec();
             self.readback.unmap();
             row.readback_us = us(s);
@@ -441,10 +478,10 @@ impl Harness {
             }
         }
         row.frame_us = us(tick);
-        if frame == doc::HASHED_FRAME {
-            if let Some(p) = &pixels {
-                row.pixel_hash = Some(doc::fnv1a(p));
-            }
+        if frame == doc::HASHED_FRAME
+            && let Some(p) = &pixels
+        {
+            row.pixel_hash = Some(doc::fnv1a(p));
         }
         (row, pixels)
     }

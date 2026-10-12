@@ -23,7 +23,10 @@ fn main() {
         usage();
     }
     let index: usize = args[1].parse().unwrap_or_else(|_| usage());
-    let compare = args.iter().position(|a| a == "--compare").and_then(|i| args.get(i + 1));
+    let compare = args
+        .iter()
+        .position(|a| a == "--compare")
+        .and_then(|i| args.get(i + 1));
 
     let file = File::open(&args[0]).expect("open nut");
     let mut demuxer = Demuxer::open(BufReader::new(file)).expect("nut headers");
@@ -65,7 +68,12 @@ fn main() {
         let mut over_8 = 0u64;
         let mut max = 0u8;
         let mut sum = 0u64;
-        for (a, b) in data.chunks_exact(4).zip(other.as_raw().chunks_exact(4)) {
+        for (a, b) in data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(other.as_raw().as_chunks::<4>().0)
+        {
             let d = (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap();
             if d > 0 {
                 differing += 1;
@@ -85,7 +93,11 @@ fn main() {
             over_8,
             over_8 as f64 * 100.0 / total as f64,
             max,
-            if differing > 0 { sum as f64 / differing as f64 } else { 0.0 }
+            if differing > 0 {
+                sum as f64 / differing as f64
+            } else {
+                0.0
+            }
         );
     }
 }
