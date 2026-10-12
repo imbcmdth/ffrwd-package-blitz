@@ -10,9 +10,9 @@ class at 3.01 s starts its transition at exactly 3.01 s.
 The document is rendered by [Blitz](https://github.com/DioxusLabs/blitz)
 (Stylo for CSS, Taffy for layout, Parley for text, blitz-paint and Vello for
 pixels), compiled to a wasm module that ffrwd's sidecar hosts. Vello
-rasterises on the CPU (vello_cpu) by default, and on the GPU (vello_hybrid,
-through wasi:webgpu) when a call asks for it; see
-[The GPU path](#the-gpu-path).
+rasterises on the GPU (vello_hybrid, through wasi:webgpu) when the host
+has an adapter, and on the CPU (vello_cpu) otherwise or when a call asks
+for it; see [The GPU path](#the-gpu-path).
 
 ![Programme full frame](https://raw.githubusercontent.com/imbcmdth/ffrwd-package-blitz/main/examples/lbar-1-in.png)
 ![Programme shrinking to reveal the ad](https://raw.githubusercontent.com/imbcmdth/ffrwd-package-blitz/main/examples/lbar-2-mid-transition.png)
@@ -47,10 +47,8 @@ ships opens one GPU device for the whole process, so a query runs this
 module on every worker, as 0.2.1 did. (An earlier sidecar capped a
 module granted `-gpu` at two workers, since each worker opened a device of
 its own; that cap is gone from the release this version requires.)
-The figures for all workers are 0.3.0's CPU path, which rasterises as 0.2.1
-does. The cap goes when the sidecar shares one GPU device across its
-workers. A held input fed by a port is handed whatever connects there
-by the host, which does the listening.
+A held input fed by a port is handed whatever connects there by the host,
+which does the listening.
 
 ## A minimal query
 
@@ -141,21 +139,22 @@ variable, and a long document reaches the sidecar in a file of its own.
 
 ### Pixel formats
 
-`v` and `inputs` take rgba or yuv420p, whatever `renderer` says, and list
-rgba first, which is what the compiler puts on the wire: ffmpeg converts a
-decoded picture to rgba before it reaches the module. A yuv420p picture
-handed to the module as it is (by `ffrwd-wasm` given a yuv420p stream, as
-the tests do) is converted to straight rgba in the module, on the CPU path
-before it is drawn, and on the GPU path on the device. Both read the
+`v` and `inputs` take rgba or yuv420p, whatever `renderer` says. The
+compiler puts the first one listed on the wire: yuv420p with
+`renderer => 'cpu'`, so ffmpeg hands the module its decoded planes, and
+rgba otherwise, which the sidecar makes from the decoder's pictures on the
+device. A yuv420p picture is converted to straight rgba in the module, on
+the CPU path before it is drawn, and on the GPU path on the device. Both read the
 stream's colour the same way: BT.709 when its matrix is `bt709` and BT.601
 otherwise (as swscale reads a stream that does not say), full range when
 its range is `pc` and limited otherwise. Each chroma sample covers the two
 by two pixels it is coded for, as swscale's default conversion places it.
 On the CPU the conversion is ffrwd-frame's, within one level of swscale
-computed exactly and within three of swscale's default fast path. rgba is
-first because on the CPU path converting costs the module more than the
-smaller wire saves it; see
-[The CPU path's output buffer and yuv420p](#the-cpu-paths-output-buffer-and-yuv420p).
+computed exactly and within three of swscale's default fast path. yuv420p
+is first on the CPU path because the module's conversion runs on every
+worker, where ffmpeg's conversion to rgba runs in the one ffmpeg ahead of
+the sidecar and held a 4K run to 23 frames a second against 30; see
+[Through ffrwd](#through-ffrwd-at-the-sidecars-default-workers).
 
 ### Held inputs
 
@@ -300,7 +299,7 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
-| `renderer` | text | `'cpu'` | Who rasterises the document: `'cpu'` (no adapter asked for), `'auto'` (the GPU when the host has an adapter, the CPU otherwise) or `'gpu'` (refused with no adapter). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |
+| `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |
 | `fps` | number | `30` | `page`: frames a second. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |
 
@@ -327,16 +326,15 @@ another size than the output's.
 
 ## The GPU path
 
-With `renderer => 'auto'` or `renderer => 'gpu'`, an instance asks the
-host for a GPU adapter when it opens, through wasi:webgpu, with wgpu
-running on
+With `renderer => 'auto'`, the default, or `renderer => 'gpu'`, an
+instance asks the host for a GPU adapter when it opens, through
+wasi:webgpu, with wgpu running on
 [wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu). With an
 adapter, blitz-paint paints the document into anyrender_vello_hybrid,
 which prepares the scene on the CPU and rasterises it on the GPU into a
 texture of the output's size: RGBA8, premultiplied where the page is
-translucent, as the CPU path's frames are. With no adapter, and with the
-default `renderer => 'cpu'`, the document is rasterised as in 0.2, on
-vello_cpu.
+translucent, as the CPU path's frames are. With no adapter, and with
+`renderer => 'cpu'`, the document is rasterised as in 0.2, on vello_cpu.
 
 On a sidecar that holds frames on its GPU (the release after ffrwd
 0.29.5), the pictures and the frame never leave the device. The module
@@ -364,20 +362,23 @@ paths, and a frame handed back uncopied reaches neither.
 
 `renderer` chooses:
 
-- `'cpu'`, the default: the CPU. No adapter is asked for.
-- `'auto'`: the GPU when the host has an adapter, and the CPU otherwise.
-  The CPU also when an input's pictures are larger than 4096 px on a side,
-  which vello_hybrid's image atlas does not take.
+- `'auto'`, the default: the GPU when the host has an adapter, and the
+  CPU otherwise. The CPU also when an input's pictures are larger than
+  4096 px on a side, which vello_hybrid's image atlas does not take. On a
+  sidecar with no device the ports `auto` holds on the GPU are handed
+  their frames in host memory, and the module draws them on the CPU.
 - `'gpu'`: the GPU, or a refusal when the instance opens, naming
   `renderer => 'gpu'` and the reason (no adapter, a device refused, a
   frame or picture too large).
+- `'cpu'`: the CPU. No adapter is asked for.
 
-The default is `'cpu'` in this release because the GPU path reads every
-frame back from the GPU into the module, and copies every picture up to
-it, so on this release's sidecar a default run is faster on the CPU (see
-[Performance](#the-gpu-path-and-the-cpu-path-030)). The next stage of this
-work has the sidecar hand the frame on as a GPU texture, with no readback;
-once it does, the default moves to `'auto'`.
+The default is `'auto'` because the GPU path is the faster one at the
+sidecar's default workers: a programme and two 1080p pictures in picture,
+decoded and encoded on the device, run at 266 frames a second at 1080p
+and 159 at 4K, against 54 and 23 on the CPU with ffmpeg decoding and
+encoding. With the frame read back once for an encoder in ffmpeg, the GPU
+path still runs at 147 and 39. See
+[Through ffrwd](#through-ffrwd-at-the-sidecars-default-workers).
 
 `log => 'summary'` names the path, and the adapter, in the line each
 instance opens with. New parameters (`set-params`) that change `renderer`
@@ -442,6 +443,43 @@ the whole run's frames a second.
 One worker renders 1080p30 with room to spare, and a change row costs a
 fraction of a millisecond on the frame it lands. 4K30 does not fit on
 one; `compose` and `page` spread over the sidecar's workers.
+
+### Through ffrwd, at the sidecar's default workers
+
+`ffrwd run --profile` of one call: a programme of lavfi testsrc2 at 1080p
+or 4K and 60 frames a second, and two 1080p60 pictures in picture (testsrc
+and a mandelbrot), each 30% of the frame wide; all three h264 with
+B-frames, `lead => 0`. On the GPU path the sidecar decodes each input on
+the device (`d3d12va`) and encodes with `h264_d3d12va` from the device;
+on the CPU path ffmpeg decodes and converts the inputs and encodes with
+`h264_nvenc`. Windows 11, Ryzen 9 9950X, RTX 4090, ffrwd's sidecar from
+after 0.29.5, nothing else running. Frames a second are the 480 frames
+between a 2 s and a 10 s run over the difference of their wall times, so
+the start-up (about 4.5 s, most of it compiling the module) is left out;
+the median of three runs. The module's time is the profile's `process`
+row over the 10 s run, summed over the workers, per frame.
+
+| output | path | frames a second | module's time a frame | bytes to and from the host a frame |
+|---|---|---|---|---|
+| 1080p | GPU, `h264_d3d12va` | 266 | 12.2 ms | none |
+| 1080p | GPU, `h264_nvenc` (read back once) | 147 | 16.6 ms | 8.3 MB down |
+| 1080p | CPU, rgba first | 54 | 60.1 ms | 24.9 MB fetched |
+| 4K | GPU, `h264_d3d12va` | 159 | 21.8 ms | none |
+| 4K | GPU, yuv420p first | 150 | 21.8 ms | none |
+| 4K | GPU, `h264_nvenc` (read back once) | 39 | 41.9 ms | 33.2 MB down |
+| 4K | CPU, rgba first | 23 | 95.1 ms | 49.8 MB fetched |
+| 4K | CPU, yuv420p first | 30 | 131.6 ms | 18.7 MB fetched |
+
+The GPU path is the faster at both sizes whether or not the frame leaves
+the device, which is why `renderer` defaults to `'auto'`. At 4K on the
+CPU, rgba on the wire keeps the module's time lower, but the ffmpeg that
+converts the 4K programme to rgba ahead of the sidecar runs at 22 frames a
+second and holds the whole run there; with yuv420p the module converts on
+every worker and the run makes 30. On the GPU rgba first is the faster,
+159 against 150 (154 to 170 and 148 to 152 over the runs): the decoder's
+picture is made rgba in one pass on the device, where yuv420p takes a
+split into planes and then the module's own conversion. So the CPU
+renderer lists yuv420p first and the GPU renderers rgba.
 
 ### The GPU path and the CPU path (0.3.0)
 
@@ -530,8 +568,11 @@ rendered; the parts of a rendered frame are the means of its
   with `-benchmark`). That is more CPU than the module's conversion takes,
   but it runs on ffmpeg's threads beside the module, while the module's
   conversion is in its frame, and with one worker the module's frame is
-  what limits the rate. So `v` and `inputs` list rgba first, and yuv420p
-  is taken when a picture comes in that format.
+  what limits the rate. Through ffrwd at the sidecar's default workers it
+  is the other way round, since the module's conversion then runs on
+  every worker and ffmpeg's in one process, so the CPU renderer lists
+  yuv420p first (see
+  [Through ffrwd](#through-ffrwd-at-the-sidecars-default-workers)).
 
 The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
 
@@ -678,7 +719,9 @@ runs the lbar example through the sidecar with `renderer => 'gpu'` and
 `renderer => 'cpu'` and compares the frames (see
 [How close the two paths are](#how-close-the-two-paths-are)), and runs it
 on the CPU from yuv420p and from the rgba ffmpeg converts the same planes
-to, and compares those. It needs
+to, and compares those. It also runs it with `renderer => 'auto'` on a
+sidecar left with no adapter (`WGPU_BACKEND=metal`), and checks the frames
+are the CPU path's. It needs
 the module built first and finds the sidecar through `FFRWD_WASM`, or
 else in an ffrwd-cli checkout beside this repository
 (`../ffrwd-cli/sidecar/target/release/ffrwd-wasm`); the native test needs
