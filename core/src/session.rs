@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::changes::{Row, Source, Timed, Timeline};
 use crate::params::{Log, Params};
-use crate::{Compositor, Plan, bit};
+use crate::{Compositor, Gpu, Plan, RasterImageData, bit};
 
 /// What one frame turns into.
 #[derive(Debug, PartialEq)]
@@ -147,10 +147,33 @@ impl Session {
             if now.is_finite() {
                 tl.advance(&mut comp, now);
             }
+            comp.set_gpu(self.comp.take_gpu());
             self.comp = comp;
             self.tl = tl;
         }
         self.params = params;
+    }
+
+    /// Rasterises on `gpu` from the next frame on, or on the CPU with none.
+    /// It is kept when new parameters build the document again.
+    pub fn set_gpu(&mut self, gpu: Option<Gpu>) {
+        self.comp.set_gpu(gpu);
+    }
+
+    /// The GPU renderer in use, if any.
+    pub fn gpu(&self) -> Option<&Gpu> {
+        self.comp.gpu()
+    }
+
+    /// The output frame's size.
+    pub fn size(&self) -> (u32, u32) {
+        self.out
+    }
+
+    /// Each input's picture size; none for an input this instance does not
+    /// read.
+    pub fn sizes(&self) -> &[Option<(u32, u32)>] {
+        &self.sizes
     }
 
     pub fn compositor(&mut self) -> &mut Compositor {
@@ -213,6 +236,24 @@ impl Session {
         absent: u64,
         fetch: &mut dyn FnMut(u32) -> Vec<u8>,
     ) -> Output {
+        self.frame_pictures(t, absent, &mut |input, (w, h)| {
+            let bytes = fetch(input);
+            (bytes.len() == (w as usize) * (h as usize) * 4)
+                .then(|| RasterImageData::new(w, h, Arc::new(bytes)))
+        })
+    }
+
+    /// `frame_without`, with `fetch` handing over each input's picture
+    /// (straight RGBA8 at the input's size, which it is told) as an image
+    /// it may keep: a picture handed again on a later frame with the same
+    /// blob id is uploaded to the GPU once. A picture of another size draws
+    /// nothing.
+    pub fn frame_pictures(
+        &mut self,
+        t: f64,
+        absent: u64,
+        fetch: &mut dyn FnMut(u32, (u32, u32)) -> Option<RasterImageData>,
+    ) -> Output {
         let start = Instant::now();
         let step = self.tl.advance(&mut self.comp, t);
         let s = Instant::now();
@@ -240,9 +281,10 @@ impl Session {
                     let Some((w, h)) = self.comp.size_of(input) else {
                         continue;
                     };
-                    let bytes = fetch(input);
-                    if bytes.len() == (w as usize) * (h as usize) * 4 {
-                        self.comp.set_frame(input, Arc::new(bytes));
+                    if let Some(image) = fetch(input, (w, h))
+                        && (image.width, image.height) == (w, h)
+                    {
+                        self.comp.set_frame_image(input, &image);
                         st.fetched += 1;
                     }
                 }

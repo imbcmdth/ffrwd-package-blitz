@@ -21,6 +21,17 @@ pub enum Log {
     Frame,
 }
 
+/// Who rasterises the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renderer {
+    /// The GPU when there is an adapter, otherwise the CPU.
+    Auto,
+    /// The GPU; no adapter is a refusal.
+    Gpu,
+    /// The CPU; no adapter is asked for.
+    Cpu,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
     /// The document, as HTML text.
@@ -39,6 +50,7 @@ pub struct Params {
     pub fit: Fit,
     /// Hand an input back untouched when the frame would be exactly it.
     pub bypass: bool,
+    pub renderer: Renderer,
     pub log: Log,
 }
 
@@ -53,6 +65,7 @@ impl Default for Params {
             css_height: None,
             fit: Fit::Contain,
             bypass: true,
+            renderer: Renderer::Auto,
             log: Log::Off,
         }
     }
@@ -103,6 +116,14 @@ impl Params {
                 }
                 "bypass" => {
                     p.bypass = boolean(val).ok_or("bypass must be true or false")?;
+                }
+                "renderer" => {
+                    p.renderer = match val.as_str() {
+                        Some("auto") => Renderer::Auto,
+                        Some("gpu") => Renderer::Gpu,
+                        Some("cpu") => Renderer::Cpu,
+                        _ => return Err("renderer must be 'auto', 'gpu' or 'cpu'".into()),
+                    };
                 }
                 "log" => {
                     p.log = match val.as_str() {

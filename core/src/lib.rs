@@ -1,5 +1,6 @@
 //! An HTML/CSS document rendered by Blitz (blitz-dom with Stylo, Taffy and
-//! Parley, painted by blitz-paint into anyrender_vello_cpu) over video
+//! Parley, painted by blitz-paint into anyrender_vello_cpu, or into
+//! anyrender_vello_hybrid on a GPU when one is handed over) over video
 //! frames.
 //!
 //! The video inputs appear in the document as `<img src="ffrwd:N">` or as
@@ -10,6 +11,7 @@
 
 pub mod changes;
 pub mod geometry;
+pub mod gpu;
 pub mod net;
 pub mod params;
 pub mod placed;
@@ -30,13 +32,14 @@ use kurbo::{Affine, Rect};
 use parley::fontique::{Blob, Collection, CollectionOptions, GenericFamily, SourceCache};
 use peniko::{Color, Fill};
 
-pub use changes::{Row, Source, Timeline};
-pub use geometry::{Fit, Geometry, Placement};
-pub use params::Params;
-pub use session::{Output, Session};
 /// The picture a video element holds, for a caller that keeps one across
 /// frames (its blob id is what a renderer caches an upload by).
 pub use blitz_dom::node::RasterImageData;
+pub use changes::{Row, Source, Timeline};
+pub use geometry::{Fit, Geometry, Placement};
+pub use gpu::Gpu;
+pub use params::Params;
+pub use session::{Output, Session};
 
 /// DejaVu Sans, the font every generic family resolves to: the sidecar has
 /// no system fonts. Its license is in `assets/DejaVu-LICENSE`.
@@ -140,6 +143,8 @@ pub struct Compositor {
     placeholders: Vec<Option<RasterImageData>>,
     placeholder_ids: Vec<(u64, u32)>,
     refs: Vec<VideoRef>,
+    /// The GPU renderer, when the frame is rasterised there instead.
+    gpu: Option<Gpu>,
     /// The rendered frame, RGBA8 (premultiplied, which is straight RGBA
     /// wherever the page is opaque).
     pub out: Vec<u8>,
@@ -210,6 +215,7 @@ impl Compositor {
             placeholders,
             placeholder_ids,
             refs: Vec::new(),
+            gpu: None,
             out: vec![0; (width as usize) * (height as usize) * 4],
         };
         // Before the first layout, so an `<img>` with no CSS size is laid
@@ -430,6 +436,13 @@ impl Compositor {
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
         let doc = &mut self.doc;
+        if let Some(gpu) = self.gpu.as_mut() {
+            let times = gpu.render(&mut self.out, |scene| {
+                paint_placed(scene, doc, &place, w, h);
+            });
+            self.install_placeholders();
+            return times;
+        }
         let mut cmds = 0.0;
         let t_all = Instant::now();
         self.renderer.render(
@@ -444,6 +457,26 @@ impl Compositor {
         let total = t_all.elapsed().as_secs_f64() * 1e6;
         self.install_placeholders();
         (cmds, total - cmds)
+    }
+
+    /// Rasterises on `gpu` from the next frame on, or on the CPU with none.
+    /// The GPU renderer must be built for this frame's size.
+    pub fn set_gpu(&mut self, gpu: Option<Gpu>) {
+        debug_assert!(
+            gpu.as_ref()
+                .is_none_or(|g| g.size() == (self.geometry.out_w, self.geometry.out_h))
+        );
+        self.gpu = gpu;
+    }
+
+    /// The GPU renderer, taken out.
+    pub fn take_gpu(&mut self) -> Option<Gpu> {
+        self.gpu.take()
+    }
+
+    /// The GPU renderer in use, if any.
+    pub fn gpu(&self) -> Option<&Gpu> {
+        self.gpu.as_ref()
     }
 
     /// How many video inputs this instance reads.
