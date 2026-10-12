@@ -34,10 +34,10 @@ const FAR_SHARE: f64 = 0.001;
 const MAX: u8 = 8;
 
 /// The share of pixels beyond `NEAR` allowed in a frame where the programme
-/// is being scaled. blitz-paint draws pictures with `Extend::Repeat`, and
-/// vello_cpu then shades the scaled programme's last row and column partly
-/// from its first ones (the right-hand column white, from the first bar),
-/// where vello_hybrid does not: that row and column differ by up to the
+/// is being scaled. blitz-paint draws pictures with `Extend::Repeat`, and on
+/// vello_cpu the scaled programme's last row and column take colour from its
+/// first ones (the right-hand column white, from the first bar), where on
+/// vello_hybrid they do not: that row and column differ by up to the
 /// programme's contrast across it, and its hard edges by a few levels.
 const SCALING_FAR_SHARE: f64 = 0.01;
 
@@ -513,6 +513,9 @@ fn lbar_frames_a_second() {
                     })
                     .collect();
                 let mean = rendered.iter().sum::<f64>() / rendered.len().max(1) as f64;
+                for line in log.lines().filter(|l| l.contains(" bypassed, ")) {
+                    eprintln!("  {line}");
+                }
                 eprintln!(
                     "{}x{} {renderer} jobs={}: {n} frames, {:.1} fps (first frame out to last); \
                      {:.2} ms a rendered frame over {} instance(s)",

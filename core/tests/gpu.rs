@@ -15,10 +15,10 @@ const MAX: u8 = 8;
 
 /// The share of pixels beyond `NEAR` allowed in a frame that draws a
 /// picture while it is being scaled. blitz-paint draws pictures with
-/// `Extend::Repeat`, and vello_cpu then shades the scaled picture's last
-/// row and column partly from its first ones, where vello_hybrid does not:
-/// that row and column differ by up to the picture's contrast across it, and
-/// its hard edges by a few levels.
+/// `Extend::Repeat`, and on vello_cpu the scaled picture's last row and
+/// column take colour from its first ones, where on vello_hybrid they do
+/// not: that row and column differ by up to the picture's contrast across
+/// it, and its hard edges by a few levels.
 const SCALING_FAR_SHARE: f64 = 0.01;
 
 /// When the lbar document scales the programme: the squeeze from 2.0 s and
