@@ -144,11 +144,12 @@ compiler puts the first one listed on the wire: yuv420p with
 `renderer => 'cpu'`, so ffmpeg hands the module its decoded planes, and
 rgba otherwise, which the sidecar makes from the decoder's pictures on the
 device. A yuv420p picture is converted to straight rgba in the module, on
-the CPU path before it is drawn, and on the GPU path on the device. Both read the
-stream's colour the same way: BT.709 when its matrix is `bt709` and BT.601
-otherwise (as swscale reads a stream that does not say), full range when
-its range is `pc` and limited otherwise. Each chroma sample covers the two
-by two pixels it is coded for, as swscale's default conversion places it.
+the CPU path before it is drawn, and on the GPU path on the device. Both
+read the stream's colour the same way: BT.709 when its matrix is `bt709`
+and BT.601 otherwise (as swscale reads a stream that does not say), full
+range when its range is `pc` and limited otherwise. Each chroma sample
+covers the two by two pixels it is coded for, as swscale's default
+conversion places it.
 On the CPU the conversion is ffrwd-frame's, within one level of swscale
 computed exactly and within three of swscale's default fast path. yuv420p
 is first on the CPU path because the module's conversion runs on every
