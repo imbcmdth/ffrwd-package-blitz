@@ -3,12 +3,15 @@
 # the directory stays out of the archive.
 target/
 
-# The Rust the module is built from, the test module and queries, and the
-# scripts that write the test fonts and THIRD_PARTY_NOTICES: the archive is
-# the built module, and the source is at the homepage.
+# The Rust the module is built from, the patched wgpu it links, the test
+# module and queries, the 4K60 bench, and the scripts that write the test
+# fonts and THIRD_PARTY_NOTICES: the archive is the built module, and the
+# source is at the homepage.
 core/
 compose/
+vendor/
 tests/
+bench/
 scripts/
 Cargo.toml
 Cargo.lock

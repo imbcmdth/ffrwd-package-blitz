@@ -23,9 +23,15 @@ The package's own code is MIT (see LICENSE). The wasm module it builds
 (target/wasm32-wasip2/release/compose.wasm) links the crates listed below,
 each under its own license: among them Stylo (MPL-2.0), whose source is at
 https://github.com/servo/stylo and on crates.io as stylo 0.21.0, and Blitz,
-Vello (vello_cpu), Parley, Taffy, fontique, skrifa, usvg and the image
+Vello (vello_cpu, and vello_hybrid for the GPU path), wgpu and naga,
+wgpu-wasi-webgpu, Parley, Taffy, fontique, skrifa, usvg and the image
 decoders. Where a crate offers a choice of licenses ("A OR B"), the choice
 is the recipient's.
+
+wgpu is linked as the copy in vendor/wgpu: wgpu 29.0.4 as published on
+crates.io (MIT OR Apache-2.0, https://github.com/gfx-rs/wgpu), with
+`webgpu` removed from its default features and nothing else changed; its
+license texts are in vendor/wgpu/LICENSE.MIT and vendor/wgpu/LICENSE.APACHE.
 
 The module also embeds the DejaVu Sans font (core/assets/DejaVuSans.woff2),
 under the Bitstream Vera license with public-domain DejaVu changes and the
