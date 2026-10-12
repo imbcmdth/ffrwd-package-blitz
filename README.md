@@ -455,11 +455,12 @@ on the CPU path ffmpeg decodes and converts the inputs and encodes with
 `h264_nvenc`. Windows 11, Ryzen 9 9950X, RTX 4090, ffrwd's sidecar from
 after 0.29.5, nothing else running. Frames a second are the 480 frames
 between a 2 s and a 10 s run over the difference of their wall times, so
-the start-up (about 4.5 s, most of it compiling the module) is left out;
-the median of three runs. The module's time is the profile's `process`
-row over the 10 s run, summed over the workers, per frame.
+the start-up (about 4.5 s) is left out; the median of three runs.
+`process` is the profile's row over the 10 s run per frame, summed over
+every node in the sidecar (on the GPU path the decoders and the encoder
+too) and every worker.
 
-| output | path | frames a second | module's time a frame | bytes to and from the host a frame |
+| output | path | frames a second | `process` a frame | bytes to and from the host a frame |
 |---|---|---|---|---|
 | 1080p | GPU, `h264_d3d12va` | 266 | 12.2 ms | none |
 | 1080p | GPU, `h264_nvenc` (read back once) | 147 | 16.6 ms | 8.3 MB down |
@@ -472,7 +473,7 @@ row over the 10 s run, summed over the workers, per frame.
 
 The GPU path is the faster at both sizes whether or not the frame leaves
 the device, which is why `renderer` defaults to `'auto'`. At 4K on the
-CPU, rgba on the wire keeps the module's time lower, but the ffmpeg that
+CPU, rgba on the wire keeps the module's own time lower, but the ffmpeg that
 converts the 4K programme to rgba ahead of the sidecar runs at 22 frames a
 second and holds the whole run there; with yuv420p the module converts on
 every worker and the run makes 30. On the GPU rgba first is the faster,
