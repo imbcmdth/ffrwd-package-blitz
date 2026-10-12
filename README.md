@@ -550,10 +550,9 @@ cargo test -p blitz-compose-core -p compose
 The module is a node on [ffrwd-node](https://github.com/imbcmdth/ffrwd-node),
 which carries the `ffrwd:av` world, so nothing is installed before
 building. The GPU path's backend,
-[wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu), is a
-path dependency for now: check it out beside this repository, as
-`../wgpu-wasi-webgpu`. The build takes about 5 minutes from clean (full
-LTO).
+[wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu), is a git
+dependency pinned by tag, fetched by cargo. The build takes about 5
+minutes from clean (full LTO).
 `ffrwd-wasm --describe target/wasm32-wasip2/release/compose.wasm` prints
 what the module declares, and `ffrwd-wasm --shape` its ports for a call's
 params and bound inputs.
