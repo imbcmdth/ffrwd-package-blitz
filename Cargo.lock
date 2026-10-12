@@ -3531,6 +3531,7 @@ dependencies = [
 [[package]]
 name = "wgpu-wasi-webgpu"
 version = "29.1.0"
+source = "git+https://github.com/imbcmdth/wgpu-wasi-webgpu?tag=v29.1.0#c81dd750e1d899621c8ead3285a899d518caaaac"
 dependencies = [
  "wgpu",
  "wit-bindgen",

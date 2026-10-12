@@ -19,7 +19,7 @@ wgpu.workspace = true
 # wgpu over wasi:webgpu, the GPU the sidecar hosts. A repository of its own,
 # pinned by tag, as the owner's other crates are.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu-wasi-webgpu = { git = "https://github.com/imbcmdth/wgpu-wasi-webgpu", tag = "v29.0.0" }
+wgpu-wasi-webgpu = { git = "https://github.com/imbcmdth/wgpu-wasi-webgpu", tag = "v29.1.0" }
 # The `ffrwd:gpu` bindings (wit/), whose `wasi:webgpu` is the backend's.
 wit-bindgen = "0.57.1"
 
