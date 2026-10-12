@@ -737,8 +737,10 @@ fn the_lbar_example_on_yuv420p_textures_matches_the_cpu() {
 /// frames read back over the wall time from the first frame out to the
 /// last, and the module's own mean time a rendered frame from its summary
 /// line. `LBAR_SECONDS` sets the length of each run (12 s, as the
-/// example's), `LBAR_JOBS` the worker counts (`1,default`), and
-/// `LBAR_LOG=frame` has the module log each frame's timings.
+/// example's), `LBAR_JOBS` the worker counts (`1,default`), `LBAR_SIZES`
+/// the output heights (`1080,2160`), `LBAR_RUNS` the renderers and the
+/// pixel format the pictures are fed in (`gpu:rgba,gpu:yuv420p,cpu:rgba`),
+/// and `LBAR_LOG=frame` has the module log each frame's timings.
 #[test]
 #[ignore]
 fn lbar_frames_a_second() {
@@ -750,18 +752,45 @@ fn lbar_frames_a_second() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
     let frames = seconds * FPS;
-    for size in [(1920, 1080), (3840, 2160)] {
+    let sizes: Vec<(u32, u32)> = match std::env::var("LBAR_SIZES") {
+        Ok(list) => list
+            .split(',')
+            .map(|h| match h.trim() {
+                "1080" => (1920, 1080),
+                "2160" => (3840, 2160),
+                other => panic!("LBAR_SIZES takes 1080 and 2160, not {other}"),
+            })
+            .collect(),
+        Err(_) => vec![(1920, 1080), (3840, 2160)],
+    };
+    let runs: Vec<(String, Feed)> = match std::env::var("LBAR_RUNS") {
+        Ok(list) => list
+            .split(',')
+            .map(|run| {
+                let (renderer, feed) = run.trim().split_once(':').expect("renderer:pix_fmt");
+                let feed = match feed {
+                    "rgba" => Feed::Rgba,
+                    "yuv420p" => Feed::Yuv420p,
+                    other => panic!("LBAR_RUNS takes rgba and yuv420p, not {other}"),
+                };
+                (renderer.to_owned(), feed)
+            })
+            .collect(),
+        Err(_) => vec![
+            ("gpu".to_owned(), Feed::Rgba),
+            ("gpu".to_owned(), Feed::Yuv420p),
+            ("cpu".to_owned(), Feed::Rgba),
+        ],
+    };
+    for size in sizes {
         let pictures = Arc::new(Pictures::yuv420p(size));
         let jobs_list: Vec<Option<u32>> = match std::env::var("LBAR_JOBS") {
             Ok(list) => list.split(',').map(|j| j.parse().ok()).collect(),
             Err(_) => vec![Some(1), None],
         };
         for &jobs in &jobs_list {
-            for (renderer, feed) in [
-                ("gpu", Feed::Rgba),
-                ("gpu", Feed::Yuv420p),
-                ("cpu", Feed::Rgba),
-            ] {
+            for (renderer, feed) in &runs {
+                let (renderer, feed) = (renderer.as_str(), *feed);
                 let mut run =
                     Run::start(&sidecar, &module, renderer, &pictures, feed, frames, jobs);
                 let mut data = Vec::new();
@@ -781,7 +810,10 @@ fn lbar_frames_a_second() {
                     })
                     .collect();
                 let mean = rendered.iter().sum::<f64>() / rendered.len().max(1) as f64;
-                for line in log.lines().filter(|l| l.contains(" bypassed, ")) {
+                for line in log
+                    .lines()
+                    .filter(|l| l.contains(" bypassed, ") || l.contains("blitz: t="))
+                {
                     eprintln!("  {line}");
                 }
                 eprintln!(
