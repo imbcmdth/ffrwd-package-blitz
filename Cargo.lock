@@ -519,6 +519,7 @@ dependencies = [
  "serde_json",
  "wgpu",
  "wgpu-wasi-webgpu",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -3529,8 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "wgpu-wasi-webgpu"
-version = "29.0.0"
-source = "git+https://github.com/imbcmdth/wgpu-wasi-webgpu?tag=v29.0.0#5ad770d801c17f60efdb9ca16be45a66ddd80de7"
+version = "29.1.0"
 dependencies = [
  "wgpu",
  "wit-bindgen",

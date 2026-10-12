@@ -20,6 +20,8 @@ wgpu.workspace = true
 # pinned by tag, as the owner's other crates are.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu-wasi-webgpu = { git = "https://github.com/imbcmdth/wgpu-wasi-webgpu", tag = "v29.0.0" }
+# The `ffrwd:gpu` bindings (wit/), whose `wasi:webgpu` is the backend's.
+wit-bindgen = "0.57.1"
 
 # tests/sidecar.rs: the pictures handed to the sidecar and the frames read
 # back, as NUT.

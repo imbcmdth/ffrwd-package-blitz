@@ -80,3 +80,9 @@ opt-level = 1
 # unchanged by it.
 [patch.crates-io]
 wgpu = { path = "vendor/wgpu" }
+
+# wgpu-wasi-webgpu 29.1.0, which has the texture bridges `compose` hands
+# frames across with, from a checkout beside this one until its tag is
+# pushed.
+[patch."https://github.com/imbcmdth/wgpu-wasi-webgpu"]
+wgpu-wasi-webgpu = { path = "../wgpu-wasi-webgpu" }
