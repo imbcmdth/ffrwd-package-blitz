@@ -3,15 +3,23 @@
 //! programme and an ad) run once with `renderer => 'gpu'` and once with
 //! `renderer => 'cpu'`, the frames compared one for one.
 //!
+//! On the GPU the module holds its video ports there: the sidecar puts each
+//! input frame on the device as it arrives, the module draws it from that
+//! texture and hands the frame back as one, and the sidecar reads the frame
+//! back once, at the edge, to write it out. The runs carry `-profile`, whose
+//! row says the module fetched no frame's bytes. One case feeds both runs
+//! rgba; the other feeds the GPU run yuv420p, which the module converts on
+//! the device, and the CPU run the rgba those planes stand for.
+//!
 //! The sidecar is `FFRWD_WASM` when that is set, else the release build in
 //! an ffrwd-cli checkout beside this repository; the module is the release
 //! build in `target/wasm32-wasip2` (`cargo build --target wasm32-wasip2
 //! --release` first). Without either the test skips, loudly, and passes.
 //!
 //! The pictures are made here and handed to the sidecar on its stdin as one
-//! NUT of two rgba streams: the programme (colour bars, a gradient, a
-//! moving box and a counter, as lavfi's testsrc2 has) and the ad (the
-//! orange gradient and the moving ball of the example's page).
+//! NUT of two streams: the programme (colour bars, a gradient, a moving box
+//! and a counter, as lavfi's testsrc2 has) and the ad (the orange gradient
+//! and the moving ball of the example's page).
 //!
 //! `lbar_frames_a_second`, ignored by default, measures the example's
 //! frames a second at 1080p and 4K on each path, for the README:
@@ -24,6 +32,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use compose_core::Colour;
+use compose_core::gpu::Matrix;
 use ffrwd_nut::{Demuxer, Media, Muxer, Stream, TimeBase};
 
 /// How far the GPU may stray from the CPU: within `NEAR` levels on every
@@ -128,14 +138,38 @@ const LBAR_ROWS: &str = r##"[
   {"at": 8.5, "select": "#stage", "change": "-lbar"}
 ]"##;
 
+/// How the pictures are handed to a run.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Feed {
+    Rgba,
+    /// yuv420p, BT.601 limited range, which a stream that does not say is
+    /// read as.
+    Yuv420p,
+}
+
+impl Feed {
+    fn pix_fmt(self) -> &'static str {
+        match self {
+            Feed::Rgba => "rgba",
+            Feed::Yuv420p => "yuv420p",
+        }
+    }
+}
+
 /// The programme's and the ad's pictures, `PICTURES` of each, made once and
 /// handed over in turn: the programme at the output's size, the ad at
-/// 1920x1080 as the example's page is.
+/// 1920x1080 as the example's page is. With `yuv`, each picture's yuv420p
+/// planes too, packed as the wire carries them, and the rgba pictures are
+/// what those planes convert back to.
 struct Pictures {
     size: (u32, u32),
     programme: Vec<Vec<u8>>,
     ad: Vec<Vec<u8>>,
+    yuv: Option<(Vec<Packed>, Vec<Packed>)>,
 }
+
+/// A yuv420p picture's planes, one after another.
+type Packed = Vec<u8>;
 
 const PICTURES: u64 = 60;
 const AD: (u32, u32) = (1920, 1080);
@@ -152,8 +186,109 @@ impl Pictures {
             size,
             programme: (0..PICTURES).map(|n| programme(&pb, size, n)).collect(),
             ad: (0..PICTURES).map(|n| ad(&ab, n)).collect(),
+            yuv: None,
         }
     }
+
+    /// The same pictures as yuv420p, and as the rgba those planes stand for.
+    fn yuv420p(size: (u32, u32)) -> Pictures {
+        let rgba = Pictures::new(size);
+        let both = |pictures: &[Vec<u8>], size| -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+            pictures
+                .iter()
+                .map(|p| {
+                    let planes = to_yuv420p(p, size);
+                    (planes.concat(), from_yuv420p(&planes, size))
+                })
+                .unzip()
+        };
+        let (programme_yuv, programme) = both(&rgba.programme, size);
+        let (ad_yuv, ad) = both(&rgba.ad, AD);
+        Pictures {
+            size,
+            programme,
+            ad,
+            yuv: Some((programme_yuv, ad_yuv)),
+        }
+    }
+
+    /// Picture `k` of the programme and of the ad, as `feed` hands them.
+    fn frame(&self, feed: Feed, k: usize) -> (&[u8], &[u8]) {
+        match (feed, &self.yuv) {
+            (Feed::Rgba, _) => (&self.programme[k], &self.ad[k]),
+            (Feed::Yuv420p, Some((programme, ad))) => (&programme[k], &ad[k]),
+            (Feed::Yuv420p, None) => panic!("these pictures were made as rgba alone"),
+        }
+    }
+}
+
+const BT601: Colour = Colour {
+    matrix: Matrix::Bt601,
+    full: false,
+};
+
+/// An rgba picture as yuv420p planes, BT.601 limited range, each chroma
+/// sample the mean of the two by two pixels it covers.
+fn to_yuv420p(rgba: &[u8], (w, h): (u32, u32)) -> [Vec<u8>; 3] {
+    let (w, h) = (w as usize, h as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let px = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2]].map(|c| f64::from(c) / 255.0)
+    };
+    let (kr, kb) = (0.299, 0.114);
+    let kg = 1.0 - kr - kb;
+    let luma = |[r, g, b]: [f64; 3]| kr * r + kg * g + kb * b;
+    let mut y = vec![0u8; w * h];
+    for row in 0..h {
+        for x in 0..w {
+            y[row * w + x] = (16.0 + 219.0 * luma(px(x, row))).round() as u8;
+        }
+    }
+    let (mut u, mut v) = (vec![0u8; cw * ch], vec![0u8; cw * ch]);
+    for cy in 0..ch {
+        for cx in 0..cw {
+            let (mut cb, mut cr, mut n) = (0.0, 0.0, 0.0);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (x, row) = (cx * 2 + dx, cy * 2 + dy);
+                if x < w && row < h {
+                    let p = px(x, row);
+                    let l = luma(p);
+                    cb += (p[2] - l) / (2.0 * (1.0 - kb));
+                    cr += (p[0] - l) / (2.0 * (1.0 - kr));
+                    n += 1.0;
+                }
+            }
+            u[cy * cw + cx] = (128.0 + 224.0 * cb / n).round() as u8;
+            v[cy * cw + cx] = (128.0 + 224.0 * cr / n).round() as u8;
+        }
+    }
+    [y, u, v]
+}
+
+/// yuv420p planes back to straight rgba with alpha 255, each chroma sample
+/// over the two by two pixels it covers, in double precision: what the
+/// module's conversion on the device is to make.
+fn from_yuv420p(planes: &[Vec<u8>; 3], (w, h): (u32, u32)) -> Vec<u8> {
+    let (w, h) = (w as usize, h as usize);
+    let cw = w.div_ceil(2);
+    let rows = BT601.rows();
+    let mut out = vec![255u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let c = (y / 2) * cw + x / 2;
+            let yuv =
+                [planes[0][y * w + x], planes[1][c], planes[2][c]].map(|s| f64::from(s) / 255.0);
+            for (k, row) in rows.iter().enumerate() {
+                let v = f64::from(row[0]) * yuv[0]
+                    + f64::from(row[1]) * yuv[1]
+                    + f64::from(row[2]) * yuv[2]
+                    + f64::from(row[3]);
+                out[(y * w + x) * 4 + k] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    out
 }
 
 /// The programme's still part: colour bars over the top two thirds, a grey
@@ -268,13 +403,15 @@ struct Run {
 }
 
 impl Run {
-    /// `frames` frames of the example with `renderer`, on `jobs` workers
-    /// (the sidecar's default when none).
+    /// `frames` frames of the example with `renderer`, the pictures handed
+    /// over as `feed` says, on `jobs` workers (the sidecar's default when
+    /// none), with the sidecar's `-profile` row on stderr at the end.
     fn start(
         sidecar: &Path,
         module: &Path,
         renderer: &str,
         pictures: &Arc<Pictures>,
+        feed: Feed,
         frames: u64,
         jobs: Option<u32>,
     ) -> Run {
@@ -288,12 +425,12 @@ impl Run {
             "log": std::env::var("LBAR_LOG").unwrap_or_else(|_| "summary".into()),
         });
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-        let params_file = dir.join(format!("lbar-{renderer}-{h}.json"));
+        let params_file = dir.join(format!("lbar-{renderer}-{feed:?}-{h}.json"));
         std::fs::write(&params_file, params.to_string()).unwrap();
         let module = module.to_str().unwrap();
         let mut command = Command::new(sidecar);
         command
-            .args(["-gpu", module, "-f", "nut", "-i", "pipe:0"])
+            .args(["-gpu", module, "-profile", "-f", "nut", "-i", "pipe:0"])
             .args(["-m", &format!("blitz={module}")])
             .args(["-filter_complex", "[v=0:v][inputs=0:v:1]blitz[video=out]"])
             .arg("-params-from")
@@ -313,8 +450,8 @@ impl Run {
         let feeder = std::thread::spawn(move || {
             let tb = TimeBase { num: 1, den: FPS };
             let mut streams = [
-                Stream::video("rgba", w, h, tb).unwrap(),
-                Stream::video("rgba", AD.0, AD.1, tb).unwrap(),
+                Stream::video(feed.pix_fmt(), w, h, tb).unwrap(),
+                Stream::video(feed.pix_fmt(), AD.0, AD.1, tb).unwrap(),
             ];
             for s in &mut streams {
                 s.frame_rate = Some((FPS, 1));
@@ -324,10 +461,11 @@ impl Run {
             };
             for n in 0..frames {
                 let (pts, k) = (n as i64, (n % PICTURES) as usize);
+                let (programme, ad) = pictures.frame(feed, k);
                 // A sidecar that has stopped reading ends the feed; the
                 // test reports why from its stderr.
-                if mux.write_frame_to(0, pts, &pictures.programme[k]).is_err()
-                    || mux.write_frame_to(1, pts, &pictures.ad[k]).is_err()
+                if mux.write_frame_to(0, pts, programme).is_err()
+                    || mux.write_frame_to(1, pts, ad).is_err()
                 {
                     return;
                 }
@@ -375,14 +513,36 @@ impl Run {
     }
 }
 
-#[test]
-fn the_lbar_example_on_the_gpu_matches_the_cpu() {
-    let (Some(sidecar), Some(module)) = (sidecar(), module()) else {
-        return;
-    };
-    let pictures = Arc::new(Pictures::new((W, H)));
-    let mut gpu = Run::start(&sidecar, &module, "gpu", &pictures, FRAMES, None);
-    let mut cpu = Run::start(&sidecar, &module, "cpu", &pictures, FRAMES, None);
+/// The `-profile` row a run wrote on stderr.
+fn profile(log: &str) -> serde_json::Value {
+    let row = log
+        .lines()
+        .find_map(|l| l.find(r#"{"kind":"profile""#).map(|at| &l[at..]))
+        .unwrap_or_else(|| panic!("no -profile row on stderr:\n{log}"));
+    serde_json::from_str(row).expect("the profile row is JSON")
+}
+
+/// How many times a stage of the profile row was crossed.
+fn calls(profile: &serde_json::Value, stage: &str) -> u64 {
+    profile[stage]["calls"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no {stage} in the profile row: {profile}"))
+}
+
+/// How many pictures the module's summary line says it converted on the
+/// GPU: the instance's that ends the run, which is the one that writes it.
+fn conversions(log: &str) -> u64 {
+    log.lines()
+        .filter_map(|l| {
+            let (_, rest) = l.split_once(" pictures uploaded and ")?;
+            rest.split_once(" converted")?.0.parse::<u64>().ok()
+        })
+        .sum()
+}
+
+/// Reads both runs to the end and compares their frames one for one against
+/// the tolerance; returns their stderr, gpu's first.
+fn compared(mut gpu: Run, mut cpu: Run) -> (String, String) {
     let (mut g, mut c) = (Vec::new(), Vec::new());
     let pixels = (W * H) as usize;
     let (mut frames, mut far_all, mut max_all) = (0u64, 0usize, 0u8);
@@ -453,9 +613,12 @@ fn the_lbar_example_on_the_gpu_matches_the_cpu() {
         worst_share.1,
         worst_share.0 * 100.0
     );
-    for (pts, far, max) in &scaling {
+    let worst_scaling = scaling.iter().max_by_key(|(_, far, _)| *far);
+    if let Some((pts, far, max)) = worst_scaling {
         eprintln!(
-            "  scaling, pts {pts}: {far} pixels ({:.4}%) beyond {NEAR}, largest difference {max}",
+            "{} frames scaling: the worst is pts {pts} with {:.4}% beyond {NEAR}, largest \
+             difference {max}",
+            scaling.len(),
             *far as f64 * 100.0 / pixels as f64
         );
     }
@@ -466,6 +629,106 @@ fn the_lbar_example_on_the_gpu_matches_the_cpu() {
     assert!(
         far_all as f64 <= FAR_SHARE * all as f64,
         "{far_all} pixels of the run differ by more than {NEAR} levels"
+    );
+    (gpu_log, cpu_log)
+}
+
+/// What the profile rows say of the two runs: the module on the GPU fetched
+/// no frame's bytes, and the sidecar read a frame back at most once, at the
+/// edge (a frame handed back uncopied leaves with the bytes it came with),
+/// where the module on the CPU fetched its pictures.
+fn no_bytes_crossed(gpu_log: &str, cpu_log: &str) {
+    let (gpu, cpu) = (profile(gpu_log), profile(cpu_log));
+    eprintln!("gpu run: {gpu}");
+    eprintln!("cpu run: {cpu}");
+    assert_eq!(
+        calls(&gpu, "fetch"),
+        0,
+        "the module fetched frames on the GPU path"
+    );
+    assert_eq!(
+        calls(&gpu, "emit"),
+        0,
+        "the module handed frames back as bytes on the GPU path"
+    );
+    assert!(calls(&cpu, "fetch") > 0, "the cpu run fetched nothing");
+    let downloads = calls(&gpu, "download");
+    assert!(
+        downloads > 0 && downloads <= FRAMES,
+        "{downloads} read backs for {FRAMES} frames"
+    );
+    assert_eq!(calls(&cpu, "download"), 0);
+    assert!(
+        calls(&gpu, "upload") > 0,
+        "the inputs were put on the GPU at the lane"
+    );
+    assert!(
+        gpu_log.contains("the video ports held there"),
+        "the gpu run did not hold its ports on the GPU:\n{gpu_log}"
+    );
+}
+
+#[test]
+fn the_lbar_example_on_rgba_textures_matches_the_cpu() {
+    let (Some(sidecar), Some(module)) = (sidecar(), module()) else {
+        return;
+    };
+    let pictures = Arc::new(Pictures::new((W, H)));
+    let gpu = Run::start(
+        &sidecar,
+        &module,
+        "gpu",
+        &pictures,
+        Feed::Rgba,
+        FRAMES,
+        None,
+    );
+    let cpu = Run::start(
+        &sidecar,
+        &module,
+        "cpu",
+        &pictures,
+        Feed::Rgba,
+        FRAMES,
+        None,
+    );
+    let (gpu_log, cpu_log) = compared(gpu, cpu);
+    no_bytes_crossed(&gpu_log, &cpu_log);
+    assert_eq!(conversions(&gpu_log), 0, "rgba is drawn as it is");
+}
+
+#[test]
+fn the_lbar_example_on_yuv420p_textures_matches_the_cpu() {
+    let (Some(sidecar), Some(module)) = (sidecar(), module()) else {
+        return;
+    };
+    let pictures = Arc::new(Pictures::yuv420p((W, H)));
+    let gpu = Run::start(
+        &sidecar,
+        &module,
+        "gpu",
+        &pictures,
+        Feed::Yuv420p,
+        FRAMES,
+        None,
+    );
+    let cpu = Run::start(
+        &sidecar,
+        &module,
+        "cpu",
+        &pictures,
+        Feed::Rgba,
+        FRAMES,
+        None,
+    );
+    let (gpu_log, cpu_log) = compared(gpu, cpu);
+    no_bytes_crossed(&gpu_log, &cpu_log);
+    let converted = conversions(&gpu_log);
+    eprintln!("{converted} pictures converted on the GPU");
+    assert!(converted > 0, "no yuv420p picture was converted");
+    assert!(
+        converted <= 2 * FRAMES,
+        "{converted} conversions for {FRAMES} frames of two inputs"
     );
 }
 
@@ -488,14 +751,19 @@ fn lbar_frames_a_second() {
         .unwrap_or(12);
     let frames = seconds * FPS;
     for size in [(1920, 1080), (3840, 2160)] {
-        let pictures = Arc::new(Pictures::new(size));
+        let pictures = Arc::new(Pictures::yuv420p(size));
         let jobs_list: Vec<Option<u32>> = match std::env::var("LBAR_JOBS") {
             Ok(list) => list.split(',').map(|j| j.parse().ok()).collect(),
             Err(_) => vec![Some(1), None],
         };
         for &jobs in &jobs_list {
-            for renderer in ["gpu", "cpu"] {
-                let mut run = Run::start(&sidecar, &module, renderer, &pictures, frames, jobs);
+            for (renderer, feed) in [
+                ("gpu", Feed::Rgba),
+                ("gpu", Feed::Yuv420p),
+                ("cpu", Feed::Rgba),
+            ] {
+                let mut run =
+                    Run::start(&sidecar, &module, renderer, &pictures, feed, frames, jobs);
                 let mut data = Vec::new();
                 let mut first = None;
                 let mut n = 0u64;
@@ -517,10 +785,11 @@ fn lbar_frames_a_second() {
                     eprintln!("  {line}");
                 }
                 eprintln!(
-                    "{}x{} {renderer} jobs={}: {n} frames, {:.1} fps (first frame out to last); \
+                    "{}x{} {renderer} {} jobs={}: {n} frames, {:.1} fps (first frame out to last); \
                      {:.2} ms a rendered frame over {} instance(s)",
                     size.0,
                     size.1,
+                    feed.pix_fmt(),
                     jobs.map_or("default".to_owned(), |j| j.to_string()),
                     (n - 1) as f64 / wall,
                     mean,
