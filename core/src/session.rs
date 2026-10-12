@@ -313,6 +313,10 @@ impl Session {
                 (st.paint_cmds_us, st.raster_us) = self.comp.paint_without(absent);
                 match self.comp.take_rendered() {
                     Some(frame) => Output::Rendered(frame),
+                    // The buffer leaves with the frame, since the host takes
+                    // what is emitted, and the next frame allocates its own.
+                    // Keeping one buffer and copying it out measured slower:
+                    // 1.7 ms a 4K frame against 0.7 ms.
                     None => Output::New(std::mem::take(&mut self.comp.out)),
                 }
             }
