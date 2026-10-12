@@ -145,6 +145,8 @@ pub struct Compositor {
     refs: Vec<VideoRef>,
     /// The GPU renderer, when the frame is rasterised there instead.
     gpu: Option<Gpu>,
+    /// The pictures handed over since the last paint.
+    pictures: Vec<RasterImageData>,
     /// The rendered frame, RGBA8 (premultiplied, which is straight RGBA
     /// wherever the page is opaque).
     pub out: Vec<u8>,
@@ -216,6 +218,7 @@ impl Compositor {
             placeholder_ids,
             refs: Vec::new(),
             gpu: None,
+            pictures: Vec::new(),
             out: vec![0; (width as usize) * (height as usize) * 4],
         };
         // Before the first layout, so an `<img>` with no CSS size is laid
@@ -401,6 +404,7 @@ impl Compositor {
     /// next frame, it carries the same blob id, so a renderer that caches
     /// uploads by that id uploads it once.
     pub fn set_frame_image(&mut self, input: u32, image: &RasterImageData) {
+        self.pictures.push(image.clone());
         for i in 0..self.refs.len() {
             let r = self.refs[i];
             if r.input == input {
@@ -413,6 +417,7 @@ impl Compositor {
     /// into `scene`: any anyrender scene, a GPU renderer's included. The
     /// pictures stay installed; the caller decides when they are released.
     pub fn paint_into(&mut self, scene: &mut impl PaintScene) {
+        self.pictures.clear();
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
         paint_placed(scene, &mut self.doc, &place, w, h);
@@ -436,13 +441,15 @@ impl Compositor {
         let (w, h) = (self.geometry.out_w, self.geometry.out_h);
         let place = self.place;
         let doc = &mut self.doc;
+        let pictures = std::mem::take(&mut self.pictures);
         if let Some(gpu) = self.gpu.as_mut() {
-            let times = gpu.render(&mut self.out, |scene| {
+            let times = gpu.render(&mut self.out, &pictures, |scene| {
                 paint_placed(scene, doc, &place, w, h);
             });
             self.install_placeholders();
             return times;
         }
+        self.out.resize((w as usize) * (h as usize) * 4, 0);
         let mut cmds = 0.0;
         let t_all = Instant::now();
         self.renderer.render(

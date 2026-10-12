@@ -6,7 +6,9 @@
 //!
 //! Pictures are uploaded into vello_hybrid's image atlas once per blob id:
 //! a picture handed again with the same id is not uploaded again. An upload
-//! no frame drew is freed before the next frame's.
+//! no frame drew is freed before the next frame's. A video picture with no
+//! transparency in it, which decoded video always is, goes to the atlas as
+//! it is; anything else is premultiplied on the way by vello_hybrid.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -22,8 +24,11 @@ use peniko::{BlendMode, Color, Fill, FontData, StyleRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use vello_common::paint::ImageId;
 use vello_hybrid::{
-    RenderSettings, RenderSize, RenderTargetConfig, Renderer, Resources, TextureBindings,
+    AtlasWriter, RenderSettings, RenderSize, RenderTargetConfig, Renderer, Resources,
+    TextureBindings,
 };
+
+use crate::RasterImageData;
 use wgpu_context::DeviceHandle;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -173,13 +178,15 @@ impl Gpu {
         w <= MAX_PICTURE && h <= MAX_PICTURE
     }
 
-    /// Paints with `paint` and reads the frame back into `out` (RGBA8,
-    /// premultiplied, `width * height * 4` bytes). Returns (paint_cmds_us,
-    /// raster_us): building the scene, uploads included, then the rest,
-    /// readback included.
+    /// Paints with `paint` and reads the frame back into `out`, which it
+    /// fills (RGBA8, premultiplied, `width * height * 4` bytes). `pictures` are the video
+    /// pictures the document was handed for this frame. Returns
+    /// (paint_cmds_us, raster_us): building the scene, uploads included,
+    /// then the rest, readback included.
     pub fn render(
         &mut self,
-        out: &mut [u8],
+        out: &mut Vec<u8>,
+        pictures: &[RasterImageData],
         paint: impl FnOnce(&mut Recorded<'_, VelloHybridScenePainter<'_>>),
     ) -> (f64, f64) {
         let start = Instant::now();
@@ -206,6 +213,30 @@ impl Gpu {
         self.scene.reset();
         self.used.clear();
         let cached = self.cache.len();
+        for picture in pictures {
+            let blob = picture.data.id();
+            if self.cache.contains_key(&blob) {
+                continue;
+            }
+            let bytes = picture.data.data();
+            if bytes.len() != (picture.width as usize) * (picture.height as usize) * 4
+                || !opaque(bytes)
+            {
+                continue;
+            }
+            let id = self.renderer.upload_image(
+                &mut self.resources,
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &Opaque {
+                    width: picture.width,
+                    height: picture.height,
+                    bytes,
+                },
+            );
+            self.cache.insert(blob, id);
+        }
         {
             let images = ImageManager::new(
                 &mut self.renderer,
@@ -290,14 +321,13 @@ impl Gpu {
         {
             let mapped = slice.get_mapped_range();
             let line = (self.width * 4) as usize;
+            out.clear();
+            out.reserve(line * self.height as usize);
             if line == self.row as usize {
-                out.copy_from_slice(&mapped[..out.len()]);
+                out.extend_from_slice(&mapped[..line * self.height as usize]);
             } else {
-                for (dst, src) in out
-                    .chunks_exact_mut(line)
-                    .zip(mapped.chunks_exact(self.row as usize))
-                {
-                    dst.copy_from_slice(&src[..line]);
+                for row in mapped.chunks_exact(self.row as usize) {
+                    out.extend_from_slice(&row[..line]);
                 }
             }
         }
@@ -315,6 +345,74 @@ impl Gpu {
         });
         let all = us(start);
         (cmds, all - cmds)
+    }
+}
+
+/// Whether every pixel of an RGBA8 picture has alpha 255, read two pixels
+/// at a time.
+fn opaque(bytes: &[u8]) -> bool {
+    const ALPHAS: u64 = 0xff00_0000_ff00_0000;
+    let (pairs, rest) = bytes.as_chunks::<8>();
+    pairs.chunks(1 << 13).all(|block| {
+        block
+            .iter()
+            .fold(ALPHAS, |all, pair| all & u64::from_le_bytes(*pair))
+            & ALPHAS
+            == ALPHAS
+    }) && rest.as_chunks::<4>().0.iter().all(|px| px[3] == 0xff)
+}
+
+/// An opaque picture's bytes, written into the atlas as they are: with
+/// alpha 255 everywhere, straight and premultiplied are the same bytes.
+struct Opaque<'a> {
+    width: u32,
+    height: u32,
+    bytes: &'a [u8],
+}
+
+impl AtlasWriter for Opaque<'_> {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn write_to_atlas_layer(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        atlas_texture: &wgpu::Texture,
+        layer: u32,
+        offset: [u32; 2],
+        width: u32,
+        height: u32,
+    ) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: atlas_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: offset[0],
+                    y: offset[1],
+                    z: layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            self.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 }
 

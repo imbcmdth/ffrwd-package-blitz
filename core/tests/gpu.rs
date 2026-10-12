@@ -14,11 +14,11 @@ const FAR_SHARE: f64 = 0.001;
 const MAX: u8 = 8;
 
 /// The share of pixels beyond `NEAR` allowed in a frame that draws a
-/// picture scaled by a factor that is not a whole fraction of a pixel. There
-/// vello_cpu's bilinear sampling reads past the picture's edge from its
-/// opposite edge (the last column drawn in the first column's colour), and
-/// the GPU's does not, so a row and a column of the picture differ by as
-/// much as the picture's contrast, and its hard edges by a few levels.
+/// picture while it is being scaled. blitz-paint draws pictures with
+/// `Extend::Repeat`, and vello_cpu then shades the scaled picture's last
+/// row and column partly from its first ones, where vello_hybrid does not:
+/// that row and column differ by up to the picture's contrast across it, and
+/// its hard edges by a few levels.
 const SCALING_FAR_SHARE: f64 = 0.01;
 
 /// When the lbar document scales the programme: the squeeze from 2.0 s and
@@ -244,4 +244,33 @@ fn a_held_picture_is_uploaded_once() {
             "one upload a frame for input 0, one in all for input 1"
         );
     }
+}
+
+#[test]
+fn a_picture_with_transparency_matches_the_cpu() {
+    // A picture whose alpha is not 255 everywhere is premultiplied on its
+    // way to the atlas, as the CPU path premultiplies it.
+    let html = r##"<style>html, body { margin: 0; background: #123456; }
+      img { position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; }
+      </style><img src="ffrwd:0">"##;
+    let (w, h) = (320, 180);
+    let gpu = match gpu((w, h)) {
+        Some(gpu) => gpu,
+        None => return,
+    };
+    let mut p = picture(w, h, 0, 0);
+    for (i, px) in p.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        px[3] = (i % 256) as u8;
+    }
+    let image = RasterImageData::new(w, h, Arc::new(p));
+    let sizes = vec![Some((w, h))];
+    let mut on_gpu = Session::with_sizes(params(html, "", None), (w, h), sizes.clone());
+    on_gpu.set_gpu(Some(gpu));
+    let mut on_cpu = Session::with_sizes(params(html, "", None), (w, h), sizes);
+    let mut fetch = |_: u32, _: (u32, u32)| Some(image.clone());
+    let g = rendered(on_gpu.frame_pictures(0.0, 0, &mut fetch));
+    let c = rendered(on_cpu.frame_pictures(0.0, 0, &mut fetch));
+    let (far, max) = compare(&g, &c);
+    eprintln!("transparent picture: {far} pixels beyond {NEAR} levels, largest difference {max}");
+    assert!(far as f64 <= FAR_SHARE * f64::from(w * h) && max <= MAX);
 }

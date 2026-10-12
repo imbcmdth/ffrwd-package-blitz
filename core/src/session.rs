@@ -276,7 +276,6 @@ impl Session {
             }
             _ => {
                 let s = Instant::now();
-                let len = (self.out.0 as usize) * (self.out.1 as usize) * 4;
                 for input in plan.inputs().filter(|i| absent & bit(*i) == 0) {
                     let Some((w, h)) = self.comp.size_of(input) else {
                         continue;
@@ -290,7 +289,7 @@ impl Session {
                 }
                 st.fetch_us = us(s);
                 (st.paint_cmds_us, st.raster_us) = self.comp.paint_without(absent);
-                Output::New(std::mem::replace(&mut self.comp.out, vec![0u8; len]))
+                Output::New(std::mem::take(&mut self.comp.out))
             }
         };
         st.total_us = us(start);
