@@ -333,11 +333,30 @@ running on
 [wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu). With an
 adapter, blitz-paint paints the document into anyrender_vello_hybrid,
 which prepares the scene on the CPU and rasterises it on the GPU into a
-texture of the output's size. The texture is copied into a buffer, the
-buffer is mapped, and its bytes become the frame the module hands on:
-RGBA8 at the output's size, premultiplied where the page is translucent,
-as the CPU path's frames are. With no adapter, and with the default
-`renderer => 'cpu'`, the document is rasterised as in 0.2, on vello_cpu.
+texture of the output's size: RGBA8, premultiplied where the page is
+translucent, as the CPU path's frames are. With no adapter, and with the
+default `renderer => 'cpu'`, the document is rasterised as in 0.2, on
+vello_cpu.
+
+On a sidecar that holds frames on its GPU (the release after ffrwd
+0.29.5), the pictures and the frame never leave the device. The module
+says, beside its shape, that `v`, `inputs` and `video` are held on the
+GPU (`ffrwd:gpu`'s `ports.memory`, with `renderer` `gpu` or `auto`), so
+the sidecar hands each picture over as textures of its own device and
+takes the frame back the same way:
+
+- An rgba picture is drawn straight from the sidecar's texture.
+- A yuv420p picture arrives as its three planes and is converted to rgba
+  on the device, once per picture, in the stream's matrix and range
+  (BT.709 for `bt709`, BT.601 otherwise; full range for `pc`, limited
+  otherwise), then drawn the same way. A decoder running on the device
+  writes such planes, so decoded video reaches the page without a copy
+  through host memory.
+- The rendered frame leaves as a texture (`frames.emit`); whatever reads
+  it next on the device (an encoder on the device, another module)
+  reads it there, and only an edge to ffmpeg downloads it.
+- A bypassed frame still leaves without being drawn: an rgba input by
+  `same`, a yuv420p one as its conversion.
 
 Only the rasteriser changes. The document, the change rows, presence, the
 choice of which inputs a frame draws and the bypass are the same on both
@@ -364,15 +383,16 @@ once it does, the default moves to `'auto'`.
 instance opens with. New parameters (`set-params`) that change `renderer`
 move the instance to the other path.
 
-Each input's picture is uploaded to the GPU once for each frame of its
+Where a picture does arrive as bytes (a sidecar that holds frames in
+host memory), it is uploaded to the GPU once for each frame of its
 source: a held input showing the same frame again, because its source is
 late or it lingers, is neither fetched nor uploaded again. A picture whose
 alpha is 255 everywhere, as decoded video is, is written to the GPU as it
 is; one with transparency is premultiplied on the way. An upload that a
 frame did not draw is freed before the next frame's uploads.
 
-Each worker opens an instance, and each instance on the GPU opens a GPU
-device of its own.
+Each worker opens an instance; every instance shares the sidecar's one
+GPU device.
 
 ### How close the two paths are
 
