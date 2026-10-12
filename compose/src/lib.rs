@@ -10,9 +10,9 @@
 //! record of each feed, so a call is pure and a host spreads it over
 //! workers, each folding the rows of the ticks the others rendered.
 //!
-//! The document is rasterised on the GPU when the host has one (`renderer`
-//! `auto`, the default, or `gpu`), through wgpu over wasi:webgpu, and on the
-//! CPU otherwise; the frame that leaves is the same RGBA either way.
+//! The document is rasterised on the CPU by default (`renderer` `cpu`), and
+//! on the GPU through wgpu over wasi:webgpu with `renderer` `gpu`, or `auto`
+//! when the host has one; the frame that leaves is the same RGBA either way.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -30,7 +30,7 @@ use ffrwd_node::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
+const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"cpu"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
 /// What `changes` reads: rows with a selector. The rest of a row is read
 /// when it is applied, and a row that does not read is logged.

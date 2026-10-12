@@ -65,7 +65,7 @@ impl Default for Params {
             css_height: None,
             fit: Fit::Contain,
             bypass: true,
-            renderer: Renderer::Auto,
+            renderer: Renderer::Cpu,
             log: Log::Off,
         }
     }
