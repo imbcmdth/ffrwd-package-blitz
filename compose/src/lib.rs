@@ -9,13 +9,20 @@
 //! `changes` are folded as state and presence rows come from the host's
 //! record of each feed, so a call is pure and a host spreads it over
 //! workers, each folding the rows of the ticks the others rendered.
+//!
+//! The document is rasterised on the GPU when the host has one (`renderer`
+//! `auto`, the default, or `gpu`), through wgpu over wasi:webgpu, and on the
+//! CPU otherwise; the frame that leaves is the same RGBA either way.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use compose_core::params::{Log, Params as Document};
+use std::sync::Arc;
+
+use compose_core::gpu::MAX_PICTURE;
+use compose_core::params::{Log, Params as Document, Renderer};
 use compose_core::presence::{self, Clock, Entry, Presence, Seen};
-use compose_core::{MAX_INPUTS, Output as Made, Session, bit};
+use compose_core::{Gpu, MAX_INPUTS, Output as Made, RasterImageData, Session, bit};
 use ffrwd_node::{
     Anchor, Bound, BoundStream, Init, Input, Node, Out, Output, Rational, Result, Shape, StateRow,
     Tick,
@@ -23,7 +30,7 @@ use ffrwd_node::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
+const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
 /// What `changes` reads: rows with a selector. The rest of a row is read
 /// when it is applied, and a row that does not read is logged.
@@ -71,11 +78,63 @@ fn positive(seconds: f64) -> Option<f64> {
     (seconds > 0.0).then_some(seconds)
 }
 
+/// The GPU the host offers: wgpu over wasi:webgpu. On any other target
+/// there is none, so the native tests render on the CPU.
+fn instance() -> wgpu::Instance {
+    #[cfg(target_arch = "wasm32")]
+    {
+        wgpu_wasi_webgpu::instance()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::empty(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        })
+    }
+}
+
+/// The GPU renderer `renderer` asks for, for frames of `out` over pictures
+/// of `sizes`: none for `cpu`, and for `auto` when there is no adapter or a
+/// picture is too large for it; `gpu` refuses rather than fall back.
+fn choose(
+    renderer: Renderer,
+    out: (u32, u32),
+    sizes: &[Option<(u32, u32)>],
+    summary: bool,
+) -> Result<Option<Gpu>, String> {
+    if renderer == Renderer::Cpu {
+        return Ok(None);
+    }
+    let made = match sizes
+        .iter()
+        .flatten()
+        .find(|(w, h)| !Gpu::takes_picture(*w, *h))
+    {
+        Some((w, h)) => Err(format!(
+            "a {w}x{h} picture is larger than the GPU path takes ({MAX_PICTURE} px a side)"
+        )),
+        None => Gpu::new(&instance(), out),
+    };
+    match made {
+        Ok(gpu) => Ok(Some(gpu)),
+        Err(e) if renderer == Renderer::Gpu => Err(format!("renderer => 'gpu': {e}")),
+        Err(e) => {
+            if summary {
+                eprintln!("compose: rendering on the CPU: {e}");
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Which frame a picture is: its stream, its pts, and the feed it came on.
+type FrameKey = (u32, i64, Option<(i64, i64)>);
+
 pub struct Compose {
     v: Option<u32>,
     /// The streams of `inputs`, input 1 on.
     held: Vec<u32>,
-    sizes: Vec<Option<(u32, u32)>>,
     bases: HashMap<u32, Rational>,
     session: Session,
     presence: Presence,
@@ -83,6 +142,10 @@ pub struct Compose {
     watched: Vec<u32>,
     /// One frame of the clock, in its pts, where a frame does not say.
     step: Option<i64>,
+    /// The picture each input last handed over, kept so that a frame shown
+    /// again (a held input repeating while its source is late) is the same
+    /// image: not fetched again, and not uploaded to the GPU again.
+    pictures: Vec<Option<(FrameKey, RasterImageData)>>,
 }
 
 fn watched(entries: &[Entry], held: &[u32]) -> Result<Vec<u32>, String> {
@@ -216,14 +279,17 @@ impl Node for Compose {
         .filter(|step| *step > 0);
         let summary = doc.log != Log::Off;
         let started = Instant::now();
+        let renderer = doc.renderer;
+        let pictures = vec![None; sizes.len()];
         let mut session = Session::with_sizes(doc, out, sizes.clone());
+        session.set_gpu(choose(renderer, out, &sizes, summary)?);
         for e in session.take_errors() {
             eprintln!("compose: row error: {e}");
         }
         if summary {
             let g = *session.compositor().geometry();
             eprintln!(
-                "compose: {}x{} rgba, {} picture(s), canvas {}x{}, design {}x{} CSS px, {} parameter rows, {} presence entr{}; document built in {:.1} ms",
+                "compose: {}x{} rgba, {} picture(s), canvas {}x{}, design {}x{} CSS px, {} parameter rows, {} presence entr{}, {}; document built in {:.1} ms",
                 out.0,
                 out.1,
                 sizes.iter().flatten().count(),
@@ -234,18 +300,22 @@ impl Node for Compose {
                 session.params.rows.len(),
                 entries.len(),
                 if entries.len() == 1 { "y" } else { "ies" },
+                match session.gpu() {
+                    Some(gpu) => format!("on the GPU ({})", gpu.adapter()),
+                    None => "on the CPU".to_owned(),
+                },
                 started.elapsed().as_secs_f64() * 1e3
             );
         }
         Ok(Compose {
             v: v.map(|s| s.id),
             held,
-            sizes,
             bases,
             session,
             presence: Presence::new(entries),
             watched,
             step,
+            pictures,
         })
     }
 
@@ -254,6 +324,16 @@ impl Node for Compose {
         let entries = Entry::parse_list(&params.presence)?;
         self.watched = watched(&entries, &self.held)?;
         self.presence.set(entries);
+        let renderer = doc.renderer;
+        if renderer != self.session.params.renderer {
+            let summary = doc.log != Log::Off;
+            let gpu = match (renderer, self.session.compositor().take_gpu()) {
+                (Renderer::Cpu, _) => None,
+                (_, Some(gpu)) => Some(gpu),
+                (_, None) => choose(renderer, self.session.size(), self.session.sizes(), summary)?,
+            };
+            self.session.set_gpu(gpu);
+        }
         self.session.set_params(doc);
         Ok(())
     }
@@ -310,29 +390,33 @@ impl Node for Compose {
                 absent |= bit(k as u32 + 1);
             }
         }
-        let (held, sizes) = (&self.held, &self.sizes);
-        let mut fetch = |input: u32| -> Vec<u8> {
-            let found = match input {
-                0 => clocked.as_ref().map(|(v, frame)| (*v, frame.index)),
+        let (held, pictures) = (&self.held, &mut self.pictures);
+        let mut fetch = |input: u32, (w, h): (u32, u32)| -> Option<RasterImageData> {
+            let (id, frame) = match input {
+                0 => clocked.as_ref().map(|(v, frame)| (*v, frame.clone()))?,
                 k => held
                     .get(k as usize - 1)
-                    .zip(shown.get(k as usize - 1).cloned().flatten())
-                    .map(|(id, frame)| (*id, frame.index)),
+                    .copied()
+                    .zip(shown.get(k as usize - 1).cloned().flatten())?,
             };
-            let Some(((id, index), Some((w, h)))) = found.zip(sizes.get(input as usize).copied())
-            else {
-                return Vec::new();
-            };
-            let bytes = tick.fetch(id, index);
-            match ffrwd_frame::Rgba::new(&bytes, w as usize, h as usize) {
-                Ok(_) => bytes,
-                Err(e) => {
-                    eprintln!("compose: input {input}: {e}");
-                    Vec::new()
-                }
+            let feed = tick.feed(id).map(|f| (f.start.at, f.start.first_pts));
+            let key = (id, frame.pts, feed);
+            let slot = pictures.get_mut(input as usize)?;
+            if let Some((kept, image)) = slot
+                && *kept == key
+            {
+                return Some(image.clone());
             }
+            let bytes = tick.fetch(id, frame.index);
+            if let Err(e) = ffrwd_frame::Rgba::new(&bytes, w as usize, h as usize) {
+                eprintln!("compose: input {input}: {e}");
+                return None;
+            }
+            let image = RasterImageData::new(w, h, Arc::new(bytes));
+            *slot = Some((key, image.clone()));
+            Some(image)
         };
-        let made = self.session.frame_without(t, absent, &mut fetch);
+        let made = self.session.frame_pictures(t, absent, &mut fetch);
         match made {
             Made::Same(0) => {
                 if let Some((v, frame)) = &clocked {

@@ -282,3 +282,29 @@ fn workers_handed_alternate_ticks_show_presence_as_one_handed_every_tick_does() 
         }
     }
 }
+
+#[test]
+fn renderer_gpu_with_no_adapter_is_refused_and_cpu_never_asks() {
+    // The native build has no GPU to offer, so `auto` renders on the CPU,
+    // `gpu` is refused by name and `cpu` does not ask.
+    let html = format!(r#"{FULL}<div id="b" class="on"></div>"#);
+    for renderer in ["auto", "cpu"] {
+        let p = params(
+            &html,
+            &format!(r#""width":32,"height":18,"renderer":"{renderer}""#),
+        );
+        let mut node = Harness::<Compose>::new(&p, vec![]).unwrap();
+        let emitted = node.process(&node.tick(0)).unwrap();
+        let [Payload::Frame { data, .. }] = emitted.on("video").as_slice() else {
+            panic!("a page makes a picture a tick")
+        };
+        assert_eq!(&data[(5 * 32 + 5) * 4..][..4], &[255, 0, 0, 255]);
+    }
+    let p = params(&html, r#""width":32,"height":18,"renderer":"gpu""#);
+    let err = match Harness::<Compose>::new(&p, vec![]) {
+        Ok(_) => panic!("renderer => 'gpu' with no adapter opened"),
+        Err(e) => e,
+    };
+    assert!(err.contains("renderer => 'gpu'"), "{err}");
+    assert!(shape(r#"{"renderer":"vulkan"}"#, &["v"]).is_err());
+}

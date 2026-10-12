@@ -22,6 +22,10 @@
 --   bypass      hand an input back without copying it on frames the
 --               document shows as nothing but that input, 1:1 over the
 --               whole frame.
+--   renderer    who rasterises the document: 'auto' (the GPU when the host
+--               has an adapter, the CPU otherwise), 'gpu' (refused with no
+--               adapter) or 'cpu' (no adapter asked for). The frame is the
+--               same RGBA either way.
 --   log         'off' (errors only), 'summary' (a line when an instance
 --               opens and one when it ends) or 'frame' (one line per frame
 --               on stderr).
@@ -58,6 +62,7 @@ CREATE FUNCTION compose(v video_stream,
                         timeout number DEFAULT 1,
                         latency number DEFAULT NULL,
                         presence text DEFAULT '',
+                        renderer text DEFAULT 'auto',
                         log text DEFAULT 'off')
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
@@ -74,6 +79,7 @@ CREATE FUNCTION page(html text DEFAULT '',
                      css_width number DEFAULT NULL,
                      css_height number DEFAULT NULL,
                      fit text DEFAULT 'contain',
+                     renderer text DEFAULT 'auto',
                      log text DEFAULT 'off')
 RETURNS source
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;

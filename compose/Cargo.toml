@@ -14,3 +14,15 @@ ffrwd-node.workspace = true
 ffrwd-frame.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+wgpu.workspace = true
+
+# wgpu over wasi:webgpu, the GPU the sidecar hosts. A repository of its own,
+# checked out beside this one; it becomes a git dependency pinned by tag once
+# it is published.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu-wasi-webgpu = { path = "../../wgpu-wasi-webgpu" }
+
+# tests/sidecar.rs: the pictures handed to the sidecar and the frames read
+# back, as NUT.
+[dev-dependencies]
+ffrwd-nut = { git = "https://github.com/imbcmdth/ffrwd-nut", tag = "v0.1.5" }
