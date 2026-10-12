@@ -8,9 +8,11 @@ CSS animations and transitions run on stream time, so a row that adds a
 class at 3.01 s starts its transition at exactly 3.01 s.
 
 The document is rendered by [Blitz](https://github.com/DioxusLabs/blitz)
-(Stylo for CSS, Taffy for layout, Parley for text, blitz-paint and Vello's
-CPU renderer for pixels), compiled to a wasm module that ffrwd's sidecar
-hosts.
+(Stylo for CSS, Taffy for layout, Parley for text, blitz-paint and Vello for
+pixels), compiled to a wasm module that ffrwd's sidecar hosts. Vello
+rasterises on the GPU when the host has one (vello_hybrid, through
+wasi:webgpu) and on the CPU otherwise (vello_cpu); see
+[The GPU path](#the-gpu-path).
 
 ![Programme full frame](https://raw.githubusercontent.com/imbcmdth/ffrwd-package-blitz/main/examples/lbar-1-in.png)
 ![Programme shrinking to reveal the ad](https://raw.githubusercontent.com/imbcmdth/ffrwd-package-blitz/main/examples/lbar-2-mid-transition.png)
@@ -26,13 +28,20 @@ the same module on its own clock.
 
 ## Requires
 
-ffrwd 0.29, whose `ffrwd/wasm` is 0.19.1. The module is a node, built
-against `ffrwd:av@0.19.1`: 0.29 is the first release that hosts a node,
-holds one source onto another's clock, hands a node rows from any producer
-in the query and keeps a record of each held input's feed. 0.28 and earlier do
-not load this package. The package needs no capabilities: no network, no
-files, no GPU. A held input fed by a port is handed whatever connects there by
-the host, which does the listening.
+The ffrwd release after 0.29.5. The module imports wasi:webgpu, and that
+release is the first whose sidecar hosts the two functions the module's
+backend adds to the interface (an encoder timestamp and the queue's
+timestamp period) and answers the interface's texture getters (a
+texture's width, height, format and the rest). 0.29.5 and earlier do not
+load this version of the package, with a GPU or without one; 0.2.1 is the
+version for them. The module is a node, built against `ffrwd:av@0.19.1`,
+and the package's `ffrwd/wasm` is 0.19.1.
+
+The package asks for one capability, `gpu`, which the compiler grants to
+every module that imports wasi:webgpu (it reads the import from the
+module's describe and passes `-gpu` to the sidecar). It needs no network
+and no files. A held input fed by a port is handed whatever connects there
+by the host, which does the listening.
 
 ## A minimal query
 
@@ -262,11 +271,12 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
+| `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). |
 | `fps` | number | `30` | `page`: frames a second. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |
 
 `page` takes `html`, `width` and `height` (1280 and 720 by default),
-`fps`, `rows`, the design size, `fit` and `log`.
+`fps`, `rows`, the design size, `fit`, `renderer` and `log`.
 
 ### Canvas, design size and output
 
@@ -285,6 +295,76 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 The bypass needs an input 1:1 over the whole output, so it is off
 whenever the design is scaled into bars, and never hands back an input of
 another size than the output's.
+
+## The GPU path
+
+When an instance opens, it asks the host for a GPU adapter through
+wasi:webgpu, with wgpu running on
+[wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu). With an
+adapter, blitz-paint paints the document into anyrender_vello_hybrid,
+which prepares the scene on the CPU and rasterises it on the GPU into a
+texture of the output's size. The texture is copied into a buffer, the
+buffer is mapped, and its bytes become the frame the module hands on:
+RGBA8 at the output's size, premultiplied where the page is translucent,
+as the CPU path's frames are. With no adapter, everything is as in 0.2,
+on vello_cpu.
+
+Only the rasteriser changes. The document, the change rows, presence, the
+choice of which inputs a frame draws and the bypass are the same on both
+paths, and a frame handed back uncopied reaches neither.
+
+`renderer` chooses:
+
+- `'auto'`, the default: the GPU when the host has an adapter, and the
+  CPU otherwise. The CPU also when an input's pictures are larger than
+  4096 px on a side, which vello_hybrid's image atlas does not take.
+- `'gpu'`: the GPU, or a refusal when the instance opens, naming
+  `renderer => 'gpu'` and the reason (no adapter, a device refused, a
+  frame or picture too large).
+- `'cpu'`: the CPU. No adapter is asked for.
+
+`log => 'summary'` names the path, and the adapter, in the line each
+instance opens with. New parameters (`set-params`) that change `renderer`
+move the instance to the other path.
+
+Each input's picture is uploaded to the GPU once for each frame of its
+source: a held input showing the same frame again, because its source is
+late or it lingers, is neither fetched nor uploaded again. A picture whose
+alpha is 255 everywhere, as decoded video is, is written to the GPU as it
+is; one with transparency is premultiplied on the way. An upload that a
+frame did not draw is freed before the next frame's uploads.
+
+Each worker opens an instance, and each instance on the GPU opens a GPU
+device of its own.
+
+### How close the two paths are
+
+`compose/tests/sidecar.rs` runs the lbar example (its document and rows,
+over a programme of colour bars, a gradient and a moving box, and an ad of
+the example page's gradient and ball) through the sidecar at 1080p, once
+with `renderer => 'gpu'` and once with `renderer => 'cpu'`, and compares
+the 285 frames. In the 241 frames where the programme is not being
+scaled, at most 0.0123% of a frame's pixels differ by more than 2 levels
+on any channel, and no pixel by more than 3. In the 44 frames where the
+programme is being scaled (2.0 s to 2.75 s and 8.5 s to 9.25 s), up to
+0.25% of a frame's pixels differ by more than 2 levels: blitz-paint asks for pictures with
+`Extend::Repeat`, and on vello_cpu a scaled picture's last row and column
+take colour from its first ones, where on vello_hybrid they do not. Along
+that row and column the two differ by up to the picture's contrast across
+it (255 in one frame here, where the programme's right-hand column is
+black on the GPU and white, from the first colour bar, on the CPU); the
+GPU's is the one without the seam. Over the whole run, 0.022% of pixels
+differ by more than 2 levels.
+
+### Building with wgpu
+
+vello_hybrid and anyrender_vello_hybrid take wgpu with its default
+features, and on wasm32 wgpu's default `webgpu` feature compiles its
+browser backend, whose wasm-bindgen imports a wasm32-wasip2 component
+cannot carry. The workspace therefore patches wgpu to `vendor/wgpu`: wgpu
+29.0.4 as published, with `webgpu` removed from its default features and
+nothing else changed (`vendor/wgpu/README.ffrwd.md`). The patch stays until
+wgpu leaves WASI out of the cfg that turns the browser backend on.
 
 ## Performance
 
@@ -306,7 +386,42 @@ One worker renders 1080p30 with room to spare, and a change row costs a
 fraction of a millisecond on the frame it lands. 4K30 does not fit on
 one; `compose` and `page` spread over the sidecar's workers.
 
-The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
+### The GPU path and the CPU path (0.3.0)
+
+The lbar example's document and rows over a programme at the output's
+size and a 1080p ad, 12 s at 30 fps (360 frames, of which the bypass hands
+back 143, before the L-bar starts and after it ends), through a release
+build of the sidecar from after ffrwd 0.29.5, on Windows 11 with a Ryzen 9
+9950X and an RTX 4090. Measured with
+`cargo test -p compose --test sidecar lbar_frames_a_second -- --ignored --nocapture`:
+the test makes the pictures and hands them to `ffrwd-wasm` on its stdin as
+NUT, and reads the frames back from its stdout, with nothing decoded or
+encoded around it. Frames a second are the frames read over the wall time
+from the first frame out to the last; the time a rendered frame is the
+module's own mean, from its `log => 'summary'` line, on one worker.
+
+| output | path | one worker (`-jobs 1`) | the sidecar's default workers |
+|---|---|---|---|
+| 1080p | GPU | 74 fps, 16.6 ms a rendered frame | 95 fps |
+| 1080p | CPU | 71 fps, 17.9 ms a rendered frame | 115 fps |
+| 4K | GPU | 19 fps, 65 ms a rendered frame | 29 fps |
+| 4K | CPU | 16 fps, 81 ms a rendered frame | 35 fps |
+
+The numbers vary by about 5% from run to run. On one worker the GPU path
+is somewhat faster, the more so at 4K, where vello_cpu's rasterising takes
+about 59 ms of the CPU path's frame. Most of the GPU path's frame is copies
+across the module's boundary; at 4K, from the module's per-frame timings
+(`LBAR_LOG=frame`), about 19 ms fetching the two pictures (as on the CPU
+path), about 20 ms uploading them to the GPU, and about 25 ms rendering
+and reading the frame back. Spread over the sidecar's workers the CPU
+path ran faster here: both paths level off by four workers, and the
+GPU path makes two more copies a frame (the pictures up to the GPU, and
+the frame back).
+`renderer => 'cpu'` is the better choice for a run spread over many
+workers on a machine with cores to spare; the GPU path leaves the cores
+free for other work, such as the encoder.
+
+The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
 
 ## Limitations and workarounds
 
@@ -385,6 +500,10 @@ The module is about 11.9 MB (3.9 MB gzipped), most of it Stylo.
      ("yuv in the "gbr" matrix is not converted here"), even one sending
      rgba: the host tags the rgba programme with a colour it then cannot
      convert to. Held streams from the query are unaffected.
+   - **A sidecar built without GPU support refuses this module**, whether
+     or not the machine has a GPU: the module imports wasi:webgpu, and
+     such a sidecar does not host it. There is no fallback to the CPU in
+     that case; use 0.2.1 there.
    - **Short animations cost extra resolves.** Blitz moves a CSS animation
      on by at most one iteration per resolve, so when frames are further
      apart than half the shortest animation (a worker that renders every
@@ -402,7 +521,11 @@ cargo test -p blitz-compose-core -p compose
 
 The module is a node on [ffrwd-node](https://github.com/imbcmdth/ffrwd-node),
 which carries the `ffrwd:av` world, so nothing is installed before
-building. The build takes about 5 minutes from clean (full LTO).
+building. The GPU path's backend,
+[wgpu-wasi-webgpu](https://github.com/imbcmdth/wgpu-wasi-webgpu), is a
+path dependency for now: check it out beside this repository, as
+`../wgpu-wasi-webgpu`. The build takes about 5 minutes from clean (full
+LTO).
 `ffrwd-wasm --describe target/wasm32-wasip2/release/compose.wasm` prints
 what the module declares, and `ffrwd-wasm --shape` its ports for a call's
 params and bound inputs.
@@ -422,10 +545,23 @@ images. They take a few seconds once built.
 sidecar, `tests/stream_rows2.sql` does it with a second picture held, and
 `tests/presence.sql` drives a document from a held input's feed.
 
+Two tests cover the GPU path. `core/tests/gpu.rs` renders the lbar
+document, a translucent page, a picture with transparency and a held
+picture on vello_cpu and on vello_hybrid with wgpu's native backends, and
+checks that a held picture is uploaded once. `compose/tests/sidecar.rs`
+runs the lbar example through the sidecar with `renderer => 'gpu'` and
+`renderer => 'cpu'` and compares the frames (see
+[How close the two paths are](#how-close-the-two-paths-are)). It needs
+the module built first and finds the sidecar through `FFRWD_WASM`, or
+else in an ffrwd-cli checkout beside this repository
+(`../ffrwd-cli/sidecar/target/release/ffrwd-wasm`); the native test needs
+a GPU adapter. Without them each prints `SKIPPED` and passes.
+
 ## License
 
 MIT; see `LICENSE`. The built module includes third-party code under its
-own licenses: Stylo (MPL-2.0), Blitz, Vello, Parley, Taffy and the other
-crates listed in `THIRD_PARTY_NOTICES`, and the DejaVu Sans font
+own licenses: Stylo (MPL-2.0), Blitz, Vello, wgpu (the copy in
+`vendor/wgpu`, MIT or Apache-2.0), Parley, Taffy and the other crates
+listed in `THIRD_PARTY_NOTICES`, and the DejaVu Sans font
 (Bitstream Vera license, DejaVu changes in the public domain, Arev glyphs
 under the Arev license; `core/assets/DejaVu-LICENSE`).
