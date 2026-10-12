@@ -42,12 +42,11 @@ every module that imports wasi:webgpu (it reads the import from the
 module's describe and passes `-gpu` to the sidecar). It needs no network
 and no files.
 
-The `gpu` capability has a cost in this release, even on the default CPU
-path. The compiler runs a sidecar holding a module granted `-gpu` on at
-most two workers, so a query runs this module on two workers where 0.2.1
-ran on all of them. On the measuring machine that makes the lbar example
-about a third slower at 1080p (78 fps against 115) and over 40% slower at
-4K (20 fps against 35); see [Performance](#the-gpu-path-and-the-cpu-path-030).
+The `gpu` capability costs the CPU path nothing: the sidecar that release
+ships opens one GPU device for the whole process, so a query runs this
+module on every worker, as 0.2.1 did. (An earlier sidecar capped a
+module granted `-gpu` at two workers, since each worker opened a device of
+its own; that cap is gone from the release this version requires.)
 The figures for all workers are 0.3.0's CPU path, which rasterises as 0.2.1
 does. The cap goes when the sidecar shares one GPU device across its
 workers. A held input fed by a port is handed whatever connects there
@@ -425,12 +424,11 @@ module's own mean, from its `log => 'summary'` line, on one worker.
 | 4K | GPU | 19 fps, 65 ms a rendered frame | 23 fps | 29 fps |
 | 4K | CPU | 16 fps, 81 ms a rendered frame | 20 fps | 35 fps |
 
-Two workers is what a query through ffrwd gets today, on either path: the
-compiler grants `-gpu` to this module because it imports wasi:webgpu,
-whatever `renderer` says, and caps a sidecar holding a module with that
-grant at two workers, since each worker opens a GPU device of its own; the
-cap is lifted when the sidecar shares one device across its workers. The
-`-jobs 2` figures are the mean of two runs.
+A query through ffrwd runs this module on the sidecar's default workers,
+on either path: the compiler grants `-gpu` to this module because it
+imports wasi:webgpu, whatever `renderer` says, and the sidecar's workers
+share its one GPU device. The `-jobs 2` column is kept as a measurement
+of a run held to two workers; its figures are the mean of two runs.
 
 The numbers vary by about 5% from run to run. On one worker the GPU path
 is somewhat faster, the more so at 4K, where vello_cpu's rasterising takes
@@ -528,10 +526,6 @@ The module is about 12.5 MB (4.1 MB gzipped), most of it Stylo.
      or not the machine has a GPU: the module imports wasi:webgpu, and
      such a sidecar does not host it. There is no fallback to the CPU in
      that case; use 0.2.1 there.
-   - **A query runs this module on two workers**, on either path: the
-     compiler caps a sidecar holding a module granted `-gpu` at two
-     workers. A run that 0.2.1 spread over every core is slower for it;
-     see [Requires](#requires).
    - **Short animations cost extra resolves.** Blitz moves a CSS animation
      on by at most one iteration per resolve, so when frames are further
      apart than half the shortest animation (a worker that renders every
