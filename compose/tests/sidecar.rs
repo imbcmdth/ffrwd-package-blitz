@@ -465,6 +465,21 @@ impl Run {
         frames: u64,
         jobs: Option<u32>,
     ) -> Run {
+        Run::start_with(sidecar, module, renderer, pictures, feed, frames, jobs, &[])
+    }
+
+    /// As [`Run::start`], with `env` set for the sidecar.
+    #[allow(clippy::too_many_arguments)]
+    fn start_with(
+        sidecar: &Path,
+        module: &Path,
+        renderer: &str,
+        pictures: &Arc<Pictures>,
+        feed: Feed,
+        frames: u64,
+        jobs: Option<u32>,
+        env: &[(&str, &str)],
+    ) -> Run {
         let (w, h) = pictures.size;
         let params = serde_json::json!({
             "html": LBAR,
@@ -480,6 +495,7 @@ impl Run {
         let module = module.to_str().unwrap();
         let mut command = Command::new(sidecar);
         command
+            .envs(env.iter().copied())
             .args(["-gpu", module, "-profile", "-f", "nut", "-i", "pipe:0"])
             .args(["-m", &format!("blitz={module}")])
             .args(["-filter_complex", "[v=0:v][inputs=0:v:1]blitz[video=out]"])
@@ -745,6 +761,52 @@ fn the_lbar_example_on_rgba_textures_matches_the_cpu() {
     let (gpu_log, cpu_log) = compared(gpu, cpu);
     no_bytes_crossed(&gpu_log, &cpu_log);
     assert_eq!(conversions(&gpu_log), 0, "rgba is drawn as it is");
+}
+
+#[test]
+fn auto_with_no_adapter_renders_on_the_cpu_through_the_sidecar() {
+    // `auto` holds the video ports on the GPU; a sidecar with no device
+    // hands them frames in host memory, and the module draws them on the
+    // CPU, as `cpu` does. `WGPU_BACKEND=metal` leaves Windows and Linux
+    // with no adapter.
+    let (Some(sidecar), Some(module)) = (sidecar(), module()) else {
+        return;
+    };
+    if cfg!(target_os = "macos") {
+        eprintln!("SKIPPED: macOS has a Metal adapter to find");
+        return;
+    }
+    const SOME: u64 = 30;
+    let pictures = Arc::new(Pictures::new((W, H)));
+    let none = [("WGPU_BACKEND", "metal")];
+    let mut auto = Run::start_with(
+        &sidecar,
+        &module,
+        "auto",
+        &pictures,
+        Feed::Rgba,
+        SOME,
+        None,
+        &none,
+    );
+    let mut cpu = Run::start(&sidecar, &module, "cpu", &pictures, Feed::Rgba, SOME, None);
+    let (mut a, mut c) = (Vec::new(), Vec::new());
+    let mut frames = 0;
+    while let Some(pts) = auto.next(&mut a) {
+        assert_eq!(
+            cpu.next(&mut c),
+            Some(pts),
+            "the runs' frames are at the same times"
+        );
+        assert!(a == c, "the frame at {pts} is the CPU's");
+        frames += 1;
+    }
+    assert_eq!(cpu.next(&mut c), None);
+    assert_eq!(frames, SOME);
+    let log = auto.finish("auto");
+    cpu.finish("cpu");
+    assert!(log.contains("[gpu] no device"), "{log}");
+    assert!(log.contains("on the CPU"), "{log}");
 }
 
 #[test]
