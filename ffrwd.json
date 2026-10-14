@@ -4,6 +4,7 @@
   "description": "An HTML/CSS video compositor: a static HTML document with the video inputs as images, driven over time by change rows, rendered by Blitz (Stylo, Taffy, Parley, Vello) in the wasm sidecar, on the GPU when the host has one and on the CPU otherwise.",
   "license": "MIT",
   "homepage": "https://github.com/imbcmdth/ffrwd-package-blitz",
+  "ffrwd": ">=0.30.0",
   "capabilities": [
     "gpu"
   ],

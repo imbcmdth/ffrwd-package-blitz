@@ -28,8 +28,8 @@ the same module on its own clock.
 
 ## Requires
 
-The ffrwd release after 0.29.5. The module imports wasi:webgpu, and that
-release is the first whose sidecar hosts the two functions the module's
+ffrwd 0.30.0 or newer. The module imports wasi:webgpu, and 0.30.0 is the
+first release whose sidecar hosts the two functions the module's
 backend adds to the interface (an encoder timestamp and the queue's
 timestamp period) and answers the interface's texture getters (a
 texture's width, height, format and the rest). 0.29.5 and earlier do not
@@ -337,8 +337,8 @@ texture of the output's size: RGBA8, premultiplied where the page is
 translucent, as the CPU path's frames are. With no adapter, and with
 `renderer => 'cpu'`, the document is rasterised as in 0.2, on vello_cpu.
 
-On a sidecar that holds frames on its GPU (the release after ffrwd
-0.29.5), the pictures and the frame never leave the device. The module
+On a sidecar that holds frames on its GPU (ffrwd 0.30.0 and later), the
+pictures and the frame never leave the device. The module
 says, beside its shape, that `v`, `inputs` and `video` are held on the
 GPU (`ffrwd:gpu`'s `ports.memory`, with `renderer` `gpu` or `auto`), so
 the sidecar hands each picture over as textures of its own device and
@@ -453,8 +453,8 @@ and a mandelbrot), each 30% of the frame wide; all three h264 with
 B-frames, `lead => 0`. On the GPU path the sidecar decodes each input on
 the device (`d3d12va`) and encodes with `h264_d3d12va` from the device;
 on the CPU path ffmpeg decodes and converts the inputs and encodes with
-`h264_nvenc`. Windows 11, Ryzen 9 9950X, RTX 4090, ffrwd's sidecar from
-after 0.29.5, nothing else running. Frames a second are the 480 frames
+`h264_nvenc`. Windows 11, Ryzen 9 9950X, RTX 4090, ffrwd 0.30.0's sidecar,
+nothing else running. Frames a second are the 480 frames
 between a 2 s and a 10 s run over the difference of their wall times, so
 the start-up (about 4.5 s) is left out; the median of three runs.
 `process` is the profile's row over the 10 s run per frame, summed over
@@ -488,7 +488,7 @@ renderer lists yuv420p first and the GPU renderers rgba.
 The lbar example's document and rows over a programme at the output's
 size and a 1080p ad, 12 s at 30 fps (360 frames, of which the bypass hands
 back 143, before the L-bar starts and after it ends), through a release
-build of the sidecar from after ffrwd 0.29.5, on Windows 11 with a Ryzen 9
+build of ffrwd 0.30.0's sidecar, on Windows 11 with a Ryzen 9
 9950X and an RTX 4090. Measured with
 `cargo test -p compose --test sidecar lbar_frames_a_second -- --ignored --nocapture`:
 the test makes the pictures and hands them to `ffrwd-wasm` on its stdin as
