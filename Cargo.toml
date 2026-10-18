@@ -72,6 +72,13 @@ panic = "abort"
 [profile.dev.package."*"]
 opt-level = 3
 
+# blitz-dom's resolve_undisplayed_style, which styles an element inside a
+# `display: none` subtree, drops its thread-local style context after it has
+# left Stylo's layout state, which a debug assertion in Stylo refuses. The
+# release build has no debug assertions; the tests build Stylo without them.
+[profile.dev.package.stylo]
+debug-assertions = false
+
 [profile.dev]
 opt-level = 1
 

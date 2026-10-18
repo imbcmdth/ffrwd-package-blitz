@@ -18,6 +18,7 @@ pub mod placed;
 pub mod presence;
 pub mod probe;
 pub mod session;
+pub mod sound;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,6 +41,7 @@ pub use geometry::{Fit, Geometry, Placement};
 pub use gpu::{Colour, Gpu, Picture};
 pub use params::Params;
 pub use session::{Output, Session};
+pub use sound::Voice;
 
 /// DejaVu Sans, the font every generic family resolves to: the sidecar has
 /// no system fonts. Its license is in `assets/DejaVu-LICENSE`.
@@ -297,6 +299,72 @@ impl Compositor {
         // have gained or lost an `ffrwd:` background.
         self.find_video();
         self.install_placeholders();
+    }
+
+    /// Every element that shows an input, once per input it shows, with
+    /// its sound's custom properties as last resolved. Whether it is drawn
+    /// does not matter: a hidden element still sounds.
+    pub fn voices(&self) -> Vec<Voice> {
+        let mut seen: Vec<(NodeId, u32)> = Vec::new();
+        let mut voices = Vec::new();
+        for r in &self.refs {
+            if seen.contains(&(r.node, r.input)) {
+                continue;
+            }
+            seen.push((r.node, r.input));
+            let [volume, duck, squelch, release] = self.properties(
+                r.node,
+                [
+                    sound::VOLUME,
+                    sound::DUCK,
+                    sound::SQUELCH,
+                    sound::SQUELCH_RELEASE,
+                ],
+            );
+            voices.push(Voice {
+                input: r.input,
+                volume: volume.and_then(|v| sound::level(&v)).unwrap_or(1.0),
+                duck: duck.and_then(|v| sound::level(&v)),
+                squelch: match squelch {
+                    Some(v) => sound::squelch(&v),
+                    None => Some(sound::THRESHOLD),
+                },
+                release: release
+                    .and_then(|v| sound::level(&v))
+                    .unwrap_or(sound::RELEASE),
+            });
+        }
+        voices
+    }
+
+    /// Custom properties `names` (without their `--`) on `node`, as CSS
+    /// text. A node inside a `display: none` subtree has no stored style,
+    /// so its style is resolved for the asking.
+    fn properties<const K: usize>(&self, node: NodeId, names: [&str; K]) -> [Option<String>; K] {
+        macro_rules! read {
+            ($styles:expr) => {{
+                let styles = $styles;
+                let props = styles.custom_properties();
+                names.map(|name| {
+                    let name = blitz_dom::Atom::from(name);
+                    props
+                        .inherited
+                        .get(&name)
+                        .or_else(|| props.non_inherited.get(&name))
+                        .map(|value| value.to_variable_value().css)
+                })
+            }};
+        }
+        let Some(found) = self.doc.get_node(node) else {
+            return names.map(|_| None);
+        };
+        if let Some(styles) = found.primary_styles() {
+            return read!(styles);
+        }
+        match self.doc.resolve_undisplayed_style(node) {
+            Some(styles) => read!(styles),
+            None => names.map(|_| None),
+        }
     }
 
     /// Every element that shows a video input, found afresh.
