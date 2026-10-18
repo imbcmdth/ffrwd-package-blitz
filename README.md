@@ -86,18 +86,21 @@ ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 | export | reads | clock | output |
 |---|---|---|---|
 | `compose` | `v`, any number of held `inputs`, rows on `changes` | `v`'s frames | one frame per frame of `v`, `v`'s size or `width` x `height` |
+| `compose_av` | as `compose`, and each held input's sound on `audio` and `v`'s on `a` | `v`'s frames | `video` as `compose`'s, and `audio`, 48 kHz stereo, on every frame of `v` (see [Sound](#sound)) |
 | `page` | nothing | `fps` frames a second | `width` x `height`, a source read in FROM |
 
-Both are one module. A node's ports follow its params and the inputs a
-call binds, so the module is clocked by `v` when the call binds it and by
-its own rate when it does not; `page` is the second declaration, with no
-`v`.
+All three are one module. A node's ports follow its params and the inputs
+a call binds, so the module is clocked by `v` when the call binds it and
+by its own rate when it does not; `page` is a declaration with no `v`, and
+`compose_av` one with the sound ports and two outputs.
 
 Every row the document applies is folded as state, and a worker is handed
 the rows of the ticks it did not render, so `compose` and `page` spread
 over the sidecar's workers and the output is the same at any worker
 count. Presence rows are made from the host's record of each feed, which
-every worker is handed, so a call that gives `presence` spreads too.
+every worker is handed, so a call that gives `presence` spreads too. A
+`compose_av` call that binds sound runs on one worker (see
+[What sound costs](#what-sound-costs)).
 
 ## The document
 
@@ -181,6 +184,178 @@ writes to, and the ad is shown over `v` while one plays. The compiler
 writes that port into `port` and the call leaves `port` out. `port` is a
 list, one port per held input in `inputs` order, or a single port read
 as a list of one.
+
+## Sound
+
+`compose_av` is `compose` with the held inputs' sound. It takes every
+parameter `compose` does and three more:
+
+- `audio`: each held input's sound, in `inputs` order. `audio =>
+  ARRAY[m.audio]` is the first held input's sound; an input with no entry
+  is a picture with no sound, as every held input of `compose` is.
+- `a`: `v`'s own sound, input 0's, in step with `v`. A call whose held
+  sound comes over a loopback port (a run-time lateral's) binds `a`, since
+  the host conforms each connection's sound to the input it follows; a
+  silent source does when `v` has none, `input('anullsrc=r=48000:cl=stereo',
+  format => 'lavfi', realtime => true)`.
+- `audio_port`: the loopback ports of `audio`, which the compiler writes
+  for a run-time lateral, as it writes `port`. A lateral's sound shares its
+  picture's connection and port.
+
+It makes two outputs, read off the call by name, `.video` and `.audio`, or
+both at once with `.*` in a WITH body:
+
+```pgsql
+COPY (
+  WITH c AS (
+    SELECT (ffrwd.blitz.compose_av(k.video[1], ARRAY[f.video[1], cam.video[1]],
+              audio => ARRAY[f.audio[1]], a => s.audio[1],
+              html => :'html', width => 1920, height => 1080)).*
+    FROM input('color=c=black:s=16x16:r=60', format => 'lavfi', realtime => true) k,
+         input('anullsrc=r=48000:cl=stereo', format => 'lavfi', realtime => true) s,
+         input(:'feed') f, input(:'cam') cam
+  )
+  SELECT c.video, c.audio FROM c
+) TO :'dest' WITH (video_codec 'h264_d3d12va', audio_codec 'aac')
+```
+
+The feed is held input 1 with its sound, the cam input 2 with none. A
+run-time lateral's streams are written the same way: `ARRAY[m.video]` and
+`audio => ARRAY[m.audio]` over `LATERAL main_feed(launches.main) m`, where
+`main_feed` returns `TABLE(video video_stream, audio audio_stream)`.
+
+`compose` itself is unchanged: it returns the picture alone, and a query
+written for it compiles to the same node as before.
+
+### Lip sync
+
+With `audio` bound, the held pictures and their sound are one hold group
+of the host's. The host fixes one offset for each connection from its
+first picture and times the connection's sound by the same offset, so what
+plays is what shows, however the feed joined: mid-GOP, where the sound
+arrives before the first picture that decodes, or at a keyframe. A feed
+that drops and rejoins is anchored afresh, picture and sound together. A
+source tagged `smart_timed=1` is on the clock's time, its sound too.
+
+Measured with a 1080p60 H.264 and AAC feed that flashes white and beeps
+for 50 ms at the same instant each second, played into a run-time
+lateral under a clock of the query's own, dropped and rejoined three
+times at whatever point of its 2 s GOP the stream had reached: sound
+minus picture in the output was between -1.4 and 0 ms on every
+connection, with a bare document, with foundmeat's stage template, and
+with a cam with sound held beside it. The same feed through `compose`
+and `ffrwd/switch`'s sound, each anchored on its own, was +320 to +942
+ms: the sound is anchored on its first sample and the picture on its
+first keyframe, 0.5 to 1.2 s of the feed later.
+
+Several held inputs with sound need the ffrwd release that keys a hold
+group by connection: until then the host holds every stream of a group
+as one feed, and the compiler refuses a group whose connections reach
+different ports of the call. One held input with sound, beside any number
+without, works on ffrwd 0.30.
+
+### The audio output
+
+`audio` is 48 kHz stereo f32, counted in samples (a time base of
+1/48000), one run on every frame of `v`. A frame at `t` that lasts `d`
+holds the samples from `t` to `t + d`, each rounded down to a whole
+sample, so the runs meet with no gap and no sample twice: 800 a frame at
+60 fps, 800 or 801 at 59.94. Each held input's run is placed where its
+feed's offset puts it, starting later in the frame where its source
+starts later. Where nothing sounds the run is silence: before a feed
+shows, once it has ended (after `linger`, or `timeout`, as for the
+picture), and while its source is behind.
+
+### Levels
+
+Each element that shows an input, `<img src="ffrwd:N">` or one with
+`background-image: url(ffrwd:N)`, is heard at its level, and the audio is
+every element's input's sound at its element's level, summed and clamped
+to the sample range. The levels are custom properties, which cascade,
+inherit and change with classes like any CSS:
+
+- `--ffrwd-volume`: the element's level, `1` when unset or not a number.
+  `0` is silent; above `1` amplifies. An input shown by two elements is
+  heard through both, so their volumes add: a template that shows a feed
+  twice gives the second `--ffrwd-volume: 0`.
+- `--ffrwd-volume-duck`: the level the element drops to while an element
+  of another input is playing. Unset, the element is never ducked. An
+  element plays while its input is present and carries sound, its
+  `--ffrwd-volume` is above 0 and its gate (below) is open; its own duck
+  does not count, so two ducking elements duck each other. A held input
+  with no sound bound, or whose connection carries none, never plays.
+  `#main { --ffrwd-volume: 1; --ffrwd-volume-duck: 0.5 }` holds the main
+  feed at 1 alone and at 0.5 while a cam with sound is speaking.
+- `--ffrwd-squelch`: the element's gate, in dBFS, `-50` by default (near
+  silence). Each frame an input's level is the RMS of the samples it hands
+  for that frame, before any volume, over both channels: RMS follows
+  loudness, where a peak is set off by a single click. Above the squelch
+  the gate opens; it closes `--ffrwd-squelch-release` seconds (`0.5` by
+  default) after the level was last above it, so a pause between words
+  keeps it open. A closed gate silences the element, and the element does
+  not play, so it ducks nobody. `--ffrwd-squelch: none` takes the gate
+  away: the element is heard at its volume however quiet, and plays
+  whenever its input is present with sound. That is for programme sound,
+  such as a venue's game audio, whose quiet stretches the default would
+  cut; commentary gates by default. Deciding what plays by the level is a
+  first step; a voice detector may take its place later.
+
+A style sets them on the element or on any ancestor, inline or not:
+
+```html
+<style>
+  #main { --ffrwd-volume: 1; --ffrwd-volume-duck: 0.5; --ffrwd-squelch: none; }
+  .cam img { --ffrwd-squelch: -45; }
+  .replay img { --ffrwd-volume: 0; }
+  main.scene-b .cam img { --ffrwd-volume: 0; }
+</style>
+<img id="main" src="ffrwd:1"><div class="cam"><img src="ffrwd:2"></div>
+<img src="ffrwd:3" style="--ffrwd-volume: 0.5">
+```
+
+and a row changes them the way it changes anything else: a class change
+(`{"select": "main", "change": "+scene-b"}`) or an `html` replace, from
+the frame the row takes effect on.
+
+Whether an element is drawn does not matter: an element hidden by
+`display: none`, `visibility: hidden`, `opacity: 0` or by being outside
+the frame is heard at its volume, as a hidden `<video>` keeps playing in
+a browser. Only the levels and the input's presence decide the mix. (An
+element that shows an input as a `background-image` from inside a
+`display: none` subtree is the exception: the style traversal gives such
+an element no background, so it is not found. Use `<img>`.)
+
+Every change of an element's gain, a row's, a duck's or a gate's, is a
+straight ramp across the samples of the frame it lands on, from the last
+frame's gain to the new one: 16.7 ms at 60 fps, 33 ms at 30. A step would
+click; a ramp of a few milliseconds no longer does, and one frame is the
+shortest ramp that needs no state beyond the frame's own samples and ends
+on the frame the change belongs to. A fade longer than a frame is a run of
+rows, one a frame.
+
+### What sound costs
+
+The gates' releases and the ramps carry from one frame to the next, so a
+`compose_av` call that binds sound is not pure and runs on one worker,
+however many the sidecar has. A call without sound spreads as `compose`
+does.
+
+On the GPU path that one worker is not what limits a run. A 1080p60 and a
+4K60 programme with foundmeat's stage template in its scorebug state over
+it, decoded and encoded on the device (`h264_d3d12va`), sustained the same
+frames a second with sound on one worker as without it on the sidecar's
+default workers (10 s and 40 s clips, the extra frames over the extra
+seconds, ffrwd 0.30.2, RTX 4090 shared with another run):
+
+| programme | with sound, one worker | without sound, default workers |
+|---|---|---|
+| 1080p60 | 579 fps | 573 fps |
+| 4K60 | 155 fps | 155 fps |
+
+The device's decoding and encoding set the pace at both sizes. One
+worker keeps up with 4K60 there with more than twice the frames to spare;
+a document that costs more to render (many layers, large animated areas)
+spends that margin first.
 
 ## Change rows
 
@@ -297,7 +472,10 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `fit` | text | `'contain'` | How the design fills the canvas: `'contain'` (uniform scale, centred, black bars) or `'stretch'` (each axis on its own). |
 | `bypass` | boolean | `true` | Hand an input back uncopied on frames that are nothing but it. A yuv420p input leaves converted, as a new frame. |
 | `port` | number, or a list of them | none | `compose`: the loopback ports the held inputs are given on, one each in `inputs` order; written by the compiler for laterals. |
-| `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds. |
+| `lead`, `linger`, `timeout` | number | `0.3`, `0`, `1` | `compose`: the held inputs' pairing, in seconds; their sound's too. |
+| `audio` | audio stream list | none | `compose_av`: each held input's sound, in `inputs` order. See [Sound](#sound). |
+| `a` | audio stream | none | `compose_av`: `v`'s own sound, input 0's; what a sound fed by port is conformed to. |
+| `audio_port` | number, or a list of them | none | `compose_av`: the loopback ports of `audio`; written by the compiler for laterals. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
 | `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |
@@ -704,6 +882,17 @@ handed any share of the frames, the shapes
 of `compose` and `page`, the design scale at 720p, 1080p and 4K, 16:9,
 9:16 and square canvases, whole-pixel versus transform motion, fonts and
 images. They take a few seconds once built.
+`compose/src/sound_tests.rs` and `core/src/sound.rs` cover the sound:
+where a run lands by its feed's offset, the shapes with and without it,
+the runs meeting tick to tick, volumes that add, a row changing one
+mid-run with its ramp, hidden elements, ducking (a cam at 0, a cam with
+no sound, two ducking elements), the squelch and its release across a
+pause, a squelch of a track's own, `--ffrwd-squelch: none`, and `v`'s
+own sound.
+`tests/lip_sync.sql` holds a picture and its sound whose timestamps jump
+twice, so they come as three feeds with the picture starting a quarter
+second after the sound in each, and `tests/lip_sync.py` checks the
+output: every flash's beep on the same instant, within a millisecond.
 `tests/stream_rows.sql` runs change rows from another node through the
 sidecar, `tests/stream_rows2.sql` does it with a second picture held, and
 `tests/presence.sql` drives a document from a held input's feed.
