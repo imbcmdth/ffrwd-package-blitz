@@ -328,10 +328,11 @@ an element no background, so it is not found. Use `<img>`.)
 Every change of an element's gain, a row's, a duck's or a gate's, is a
 straight ramp across the samples of the frame it lands on, from the last
 frame's gain to the new one: 16.7 ms at 60 fps, 33 ms at 30. A step would
-click; a ramp of a few milliseconds no longer does, and one frame is the
-shortest ramp that needs no state beyond the frame's own samples and ends
-on the frame the change belongs to. A fade longer than a frame is a run of
-rows, one a frame.
+click, and a ramp of a few milliseconds no longer does; a ramp of one
+frame is complete on the frame the change belongs to, so the next frame
+is at the new level whatever it brings. A gate that opens ramps its input
+in across the first frame it is loud on. A fade longer than a frame is a
+run of rows, one a frame.
 
 ### What sound costs
 
@@ -341,11 +342,12 @@ however many the sidecar has. A call without sound spreads as `compose`
 does.
 
 On the GPU path that one worker is not what limits a run. A 1080p60 and a
-4K60 programme with foundmeat's stage template in its scorebug state over
-it, decoded and encoded on the device (`h264_d3d12va`), sustained the same
-frames a second with sound on one worker as without it on the sidecar's
-default workers (10 s and 40 s clips, the extra frames over the extra
-seconds, ffrwd 0.30.2, RTX 4090 shared with another run):
+4K60 programme as `v`, with its sound on `a` and foundmeat's stage
+template in its scorebug state over it, decoded and encoded on the device
+(`h264_d3d12va`), sustained the same frames a second with sound on one
+worker as without it on the sidecar's default workers (10 s and 40 s
+clips, the extra frames over the extra seconds, ffrwd 0.30.2, RTX 4090
+shared with another run):
 
 | programme | with sound, one worker | without sound, default workers |
 |---|---|---|
