@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-bench"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blitz-bench-doc",
  "blitz-bench-harness",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-bench-compose"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blitz-bench-doc",
  "blitz-bench-harness",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-bench-doc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-bench-harness"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyrender",
  "anyrender_vello_hybrid",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "blitz-compose-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyrender",
  "anyrender_vello_cpu",
@@ -509,7 +509,7 @@ checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "compose"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blitz-compose-core",
  "ffrwd-frame",
@@ -775,7 +775,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "emit-changes"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ffrwd-node",
  "serde",

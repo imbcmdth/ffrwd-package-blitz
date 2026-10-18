@@ -28,13 +28,15 @@ the same module on its own clock.
 
 ## Requires
 
-ffrwd 0.30.0 or newer. The module imports wasi:webgpu, and 0.30.0 is the
+ffrwd 0.31.0 or newer. The module imports wasi:webgpu, and 0.30.0 is the
 first release whose sidecar hosts the two functions the module's
 backend adds to the interface (an encoder timestamp and the queue's
 timestamp period) and answers the interface's texture getters (a
-texture's width, height, format and the rest). 0.29.5 and earlier do not
+texture's width, height, format and the rest); 0.31.0 is the first that
+keys a hold group by connection, which `compose_av` needs for several
+held inputs with sound (see [Sound](#sound)). 0.29.5 and earlier do not
 load this version of the package, with a GPU or without one; 0.2.1 is the
-version for them. The module is a node, built against `ffrwd:av@0.19.1`,
+version for them, and 0.3.0 for ffrwd 0.30. The module is a node, built against `ffrwd:av@0.19.1`,
 and the package's `ffrwd/wasm` is 0.19.1.
 
 The package asks for one capability, `gpu`, which the compiler grants to
@@ -248,11 +250,11 @@ and `ffrwd/switch`'s sound, each anchored on its own, was +320 to +942
 ms: the sound is anchored on its first sample and the picture on its
 first keyframe, 0.5 to 1.2 s of the feed later.
 
-Several held inputs with sound need the ffrwd release that keys a hold
-group by connection: until then the host holds every stream of a group
-as one feed, and the compiler refuses a group whose connections reach
-different ports of the call. One held input with sound, beside any number
-without, works on ffrwd 0.30.
+Several held inputs with sound need ffrwd 0.31.0, which keys a hold
+group by connection: ffrwd 0.30 holds every stream of a group as one
+feed, and its compiler refuses a group whose connections reach different
+ports of the call. One held input with sound, beside any number without,
+works on ffrwd 0.30 with this version of the package installed by hand.
 
 ### The audio output
 
