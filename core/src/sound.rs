@@ -241,25 +241,37 @@ pub fn place(
     count: usize,
     len: usize,
 ) -> Option<(usize, usize)> {
-    let (num, den) = (base.0 as i128, (base.1 as i128).max(1));
-    let rate = RATE as i128;
-    // The source time the clock's `t` stands at, in `base`, rounded down.
-    let source = |t: Time| {
-        let t = t.minus(offset.0);
-        (t.num * den).div_euclid(t.den * num.max(1))
-    };
-    // The sample a time in `base` falls on, rounded to the nearest.
-    let sample = |pts: i128| (2 * pts * num * rate + den).div_euclid(2 * den);
-    let w0 = sample(source(start));
-    let w1 = sample(source(end));
-    let first = sample(run_pts as i128).max(w0);
-    let at = usize::try_from(first - w0).ok()?;
+    let at = lands(start, offset, base, run_pts);
     if at >= len {
         return None;
     }
+    let w1 = source_sample(end, offset, base);
+    let first = source_sample(start, offset, base) + at as i128;
     let whole = first + count as i128 >= w1;
     let fills = if whole { len - at } else { count.min(len - at) };
     Some((at, fills))
+}
+
+/// The window index a run's first sample falls on, as [`place`] puts it,
+/// for a window that starts at `start` however long it is: 0 for a run
+/// that starts before the window.
+pub fn lands(start: Time, offset: Offset, base: (i32, i32), run_pts: i64) -> usize {
+    let first = sample_of(run_pts as i128, base);
+    usize::try_from(first - source_sample(start, offset, base)).unwrap_or(0)
+}
+
+/// The source's sample the clock's `t` stands at under `offset`: the time
+/// in `base` rounded down, then to the nearest sample.
+fn source_sample(t: Time, offset: Offset, base: (i32, i32)) -> i128 {
+    let (num, den) = (base.0 as i128, (base.1 as i128).max(1));
+    let t = t.minus(offset.0);
+    sample_of((t.num * den).div_euclid(t.den * num.max(1)), base)
+}
+
+/// The sample a time in `base` falls on, rounded to the nearest.
+fn sample_of(pts: i128, base: (i32, i32)) -> i128 {
+    let (num, den) = (base.0 as i128, (base.1 as i128).max(1));
+    (2 * pts * num * RATE as i128 + den).div_euclid(2 * den)
 }
 
 /// One input's contribution to a tick: its samples (interleaved stereo),
@@ -455,6 +467,10 @@ mod tests {
             place(start, end, offset, KHZ, 24_100, 700, 800),
             Some((100, 700))
         );
+        assert_eq!(lands(start, offset, KHZ, 24_100), 100);
+        // A run past the window's end is not placed in it, and lands past it.
+        assert_eq!(place(start, end, offset, KHZ, 24_800, 800, 800), None);
+        assert_eq!(lands(start, offset, KHZ, 24_800), 800);
         // A source that stopped short leaves the rest silent.
         assert_eq!(
             place(start, end, offset, KHZ, 24_000, 300, 800),
