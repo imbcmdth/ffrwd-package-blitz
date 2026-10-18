@@ -522,3 +522,183 @@ fn the_programme_s_sound_is_input_0_s_and_a_feed_follows_its_format() {
         assert!(near(out[N - 1], 0.3), "tick {k}: {}", out[N - 1]);
     }
 }
+
+/// The clock of a NUT input: 1/61440, so a frame at 60 fps is 1024 and one
+/// unit of it is less than a sample.
+const FINE: Rational = Rational::new(1, 61_440);
+
+/// `v` on the fine clock, with its rate hint or without, its sound on `a`,
+/// and input 1 with its sound, at 0.5.
+fn fine(rated: bool) -> Harness<Compose> {
+    let mut v = BoundStream::video("v", 0, W, H, "rgba", FINE);
+    if rated {
+        v = v.rate(Rational::new(60, 1));
+    }
+    let bound = vec![
+        v,
+        BoundStream::video("inputs", picture_id(1), W, H, "rgba", FINE),
+        BoundStream::audio("audio", sound_id(1), sound::RATE, 2, "f32"),
+        BoundStream::audio("a", 5, sound::RATE, 2, "f32"),
+    ];
+    let html = doc(r#"<img src="ffrwd:1" style="--ffrwd-volume: 0.5">"#);
+    let p = serde_json::json!({ "html": html, "lead": 0 });
+    Harness::<Compose>::new(&p.to_string(), bound).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `a`'s sample `n`: a value of its own on each sample, well above the
+/// squelch.
+fn programme(n: i64) -> f32 {
+    0.1 + (n % 997) as f32 / 4000.0
+}
+
+/// What `audio` holds at sample `n` on the fine clock: `a` at 1 and input 1,
+/// 0.1 throughout, at 0.5.
+fn expected(n: i64) -> f32 {
+    programme(n) + 0.05
+}
+
+/// What left on `audio` on a tick: none, or one run that is not empty, its
+/// pts and samples, left channel.
+fn ran(emitted: &ffrwd_node::Emitted) -> Option<(i64, Vec<f32>)> {
+    match emitted.on("audio").as_slice() {
+        [] => None,
+        [
+            Payload::Frame {
+                pts,
+                duration,
+                data,
+            },
+        ] => {
+            assert!(!data.is_empty(), "an empty run at {pts}");
+            let all: Vec<f32> = data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            assert_eq!(*duration, Some((all.len() / 2) as i64));
+            Some((*pts, all.iter().step_by(2).copied().collect()))
+        }
+        other => panic!("at most one run of samples leaves a tick, not {other:?}"),
+    }
+}
+
+/// Ticks of `v` at `times` on the fine clock, with no durations, each
+/// tick's sound handed from its time to the next tick's (a frame for the
+/// last) as the host cuts it. What left on `audio` on each.
+fn run_fine(h: &mut Harness<Compose>, times: &[i64]) -> Vec<Option<(i64, Vec<f32>)>> {
+    let sample = |pts: i64| pts * sound::RATE as i64 / 61_440;
+    let picture = |v| vec![v; (W * H * 4) as usize];
+    times
+        .iter()
+        .enumerate()
+        .map(|(k, &pts)| {
+            let next = times.get(k + 1).copied().unwrap_or(pts + 1024);
+            let (s0, s1) = (sample(pts), sample(next));
+            let a: Vec<u8> = (s0..s1)
+                .flat_map(|n| [programme(n); 2])
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            let t = h
+                .tick(pts)
+                .frame(0, pts, picture(0))
+                .feed(picture_id(1), feed(0))
+                .frame(picture_id(1), pts, picture(255))
+                .feed(sound_id(1), feed(0))
+                .frame(sound_id(1), s0, samples(0.1, (s1 - s0) as usize))
+                .frame(5, s0, a);
+            ran(&h.process(&t).unwrap())
+        })
+        .collect()
+}
+
+/// The runs' pts and lengths, and their samples end to end, checking that
+/// each starts where the last ended.
+fn joined(runs: &[Option<(i64, Vec<f32>)>]) -> (Vec<Option<(i64, usize)>>, Vec<f32>) {
+    let mut all = Vec::new();
+    let mut next = None;
+    let spans = runs
+        .iter()
+        .map(|run| {
+            let (pts, samples) = run.as_ref()?;
+            if let Some(next) = next {
+                assert_eq!(*pts, next, "the runs meet");
+            }
+            next = Some(pts + samples.len() as i64);
+            all.extend_from_slice(samples);
+            Some((*pts, samples.len()))
+        })
+        .collect();
+    (spans, all)
+}
+
+#[test]
+fn with_no_rate_and_no_durations_the_step_is_learned_from_the_frames() {
+    // The first frame's step is not known, so it writes nothing, and the
+    // second run covers both frames: the same samples as with the rate.
+    let times: Vec<i64> = (0..12).map(|k| k * 1024).collect();
+    let (spans, unrated) = joined(&run_fine(&mut fine(false), &times));
+    assert_eq!(
+        spans[0], None,
+        "nothing for the first frame on its own tick"
+    );
+    assert_eq!(
+        spans[1],
+        Some((0, 2 * N)),
+        "the second run from the first frame"
+    );
+    for (k, span) in spans.iter().enumerate().skip(2) {
+        assert_eq!(*span, Some((k as i64 * N as i64, N)), "tick {k}");
+    }
+    let (spans, rated) = joined(&run_fine(&mut fine(true), &times));
+    for (k, span) in spans.iter().enumerate() {
+        assert_eq!(
+            *span,
+            Some((k as i64 * N as i64, N)),
+            "with the rate, tick {k}"
+        );
+    }
+    assert_eq!(unrated.len(), 12 * N);
+    assert_eq!(unrated, rated, "the same samples, rate or not");
+    for (n, s) in unrated.iter().enumerate() {
+        assert!(near(*s, expected(n as i64)), "sample {n}: {s}");
+    }
+}
+
+#[test]
+fn a_change_of_frame_spacing_is_followed() {
+    // 60 fps, 30 from the fifth frame, 60 again from the eighth.
+    let times = [0, 1024, 2048, 3072, 5120, 7168, 9216, 10240, 11264, 12288];
+    let (spans, all) = joined(&run_fine(&mut fine(false), &times));
+    assert_eq!(
+        spans,
+        [
+            None,
+            Some((0, 1600)),
+            Some((1600, 800)),
+            Some((2400, 800)),
+            // The fourth frame's step said 3200, and the fifth came at
+            // 4000: the run starts at 3200 with what the fourth tick's
+            // sound held past it, and goes on at the new step.
+            Some((3200, 2400)),
+            Some((5600, 1600)),
+            Some((7200, 1600)),
+            // At 8000, earlier than the step said: the last run reached
+            // 8800 and this tick's own samples end there, so it writes
+            // nothing.
+            None,
+            Some((8800, 800)),
+            Some((9600, 800)),
+        ]
+    );
+    for (n, s) in all.iter().enumerate() {
+        // From 8000 to 8800 the last run went past the sound it was handed,
+        // which ended at 8000: silence.
+        let want = if (8000..8800).contains(&n) {
+            0.0
+        } else {
+            expected(n as i64)
+        };
+        assert!(near(*s, want), "sample {n}: {s}");
+    }
+}

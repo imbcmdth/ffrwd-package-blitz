@@ -259,13 +259,16 @@ works on ffrwd 0.30 with this version of the package installed by hand.
 ### The audio output
 
 `audio` is 48 kHz stereo f32, counted in samples (a time base of
-1/48000), one run on every frame of `v`. A frame at `t` that lasts `d`
+1/48000), a run on each frame of `v`. A frame at `t` that lasts `d`
 holds the samples from `t` to `t + d`, each rounded down to a whole
 sample, so the runs meet with no gap and no sample twice: 800 a frame at
-60 fps, 800 or 801 at 59.94. Each held input's run is placed where its
-feed's offset puts it, starting later in the frame where its source
-starts later. Where nothing sounds the run is silence: before a feed
-shows, once it has ended (after `linger`, or `timeout`, as for the
+60 fps, 800 or 801 at 59.94. Where neither the frame nor the rate `v` was
+bound at gives `d`, it is learned from the spacing of `v`'s frames, and
+the first frame's samples go out with the second frame's run; a frame
+that holds no samples writes no run. Each held input's run is placed
+where its feed's offset puts it, starting later in the frame where its
+source starts later. Where nothing sounds the run is silence: before a
+feed shows, once it has ended (after `linger`, or `timeout`, as for the
 picture), and while its source is behind.
 
 ### Levels
@@ -890,11 +893,11 @@ of `compose` and `page`, the design scale at 720p, 1080p and 4K, 16:9,
 images. They take a few seconds once built.
 `compose/src/sound_tests.rs` and `core/src/sound.rs` cover the sound:
 where a run lands by its feed's offset, the shapes with and without it,
-the runs meeting tick to tick, volumes that add, a row changing one
-mid-run with its ramp, hidden elements, ducking (a cam at 0, a cam with
-no sound, two ducking elements), the squelch and its release across a
-pause, a squelch of a track's own, `--ffrwd-squelch: none`, and `v`'s
-own sound.
+the runs meeting tick to tick, with `v`'s rate given and learned from its
+frames, volumes that add, a row changing one mid-run with its ramp,
+hidden elements, ducking (a cam at 0, a cam with no sound, two ducking
+elements), the squelch and its release across a pause, a squelch of a
+track's own, `--ffrwd-squelch: none`, and `v`'s own sound.
 `tests/lip_sync.sql` holds a picture and its sound whose timestamps jump
 twice, so they come as three feeds with the picture starting a quarter
 second after the sound in each, and `tests/lip_sync.py` checks the

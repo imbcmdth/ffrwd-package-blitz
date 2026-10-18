@@ -24,9 +24,10 @@
 //! where the compiler wrote both port lists. When the call binds it, the
 //! pictures and the sound are one hold group, so each input's picture and
 //! sound share the host's one offset, and the node emits `audio` on every
-//! tick: each element's input's samples at the element's levels, summed
-//! (see `compose_core::sound`). The squelches and the ramps carry state from
-//! tick to tick, so a call with sound runs on one instance.
+//! tick that has samples: each element's input's samples at the element's
+//! levels, summed (see `compose_core::sound`). Each tick's run starts where
+//! the last ended, so the runs meet. The squelches and the ramps carry state
+//! from tick to tick, so a call with sound runs on one instance.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -95,6 +96,10 @@ const GROUP: &str = "held";
 
 /// The sound's sample format, in and out.
 const SAMPLE_FORMAT: &str = "f32";
+
+/// The longest step of the clock, in seconds, that is one frame to the next
+/// rather than a jump: the host's own bound, past which it ends every feed.
+const MAX_STEP_SECONDS: f64 = 1.0;
 
 /// What a video input is taken as: rgba, or yuv420p, which the module
 /// converts (on the device when its frames are held there). The compiler
@@ -275,8 +280,19 @@ pub struct Compose {
     presence: Presence,
     /// The stream each presence entry watches.
     watched: Vec<u32>,
-    /// One frame of the clock, in its pts, where a frame does not say.
+    /// One frame of the clock, in its pts, where a frame does not say: from
+    /// the rate `v` was bound at.
     step: Option<i64>,
+    /// One frame of the clock as its frames are spaced, for when neither a
+    /// frame nor the bound rate says: learned from the second frame on.
+    learned: Option<i64>,
+    /// The clock's last frame: its pts and its tick's ordinal.
+    last_frame: Option<(i64, u64)>,
+    /// Where the last run on `audio` ended, in samples.
+    ran_to: Option<i64>,
+    /// What the last tick's runs held past the end of its window, for the
+    /// next tick's run where it starts before its own time.
+    carried: Vec<Carried>,
     /// Whether the video ports are held on the GPU: `renderer` was `gpu` or
     /// `auto` when the instance opened, which is what `ffrwd:gpu/ports`
     /// said for it.
@@ -687,6 +703,10 @@ impl Node for Compose {
             presence: Presence::new(entries),
             watched,
             step,
+            learned: None,
+            last_frame: None,
+            ran_to: None,
+            carried: Vec::new(),
             on_gpu,
             layouts,
             pictures,
@@ -737,8 +757,9 @@ impl Node for Compose {
             None => (tick.pts(), Some(1)),
         };
         let t = seconds_of(pts, clock);
+        let follows = clocked.is_some() && self.learn(tick, pts);
         if !self.watched.is_empty() {
-            let step = duration.filter(|d| *d > 0).or(self.step);
+            let step = self.step(duration);
             let record = |f: ffrwd_node::Feed| presence::Feed {
                 known: f.start.known,
                 at: f.start.at,
@@ -837,7 +858,7 @@ impl Node for Compose {
             }
         }
         if !self.sound.is_empty() {
-            self.sound(tick, pts, duration, out)?;
+            self.sound(tick, pts, duration, follows, out)?;
         }
         for e in self.session.take_errors() {
             eprintln!("compose: row error: {e}");
@@ -854,21 +875,96 @@ impl Node for Compose {
     }
 }
 
+/// What one input's run on a tick held past the end of the tick's window:
+/// its samples from the first left unplayed, the sample of `audio` that
+/// one stands at, and the gains it is heard at, the tick's own.
+struct Carried {
+    at: i64,
+    samples: Vec<f32>,
+    from: f32,
+    to: f32,
+}
+
+/// The samples one input hands a tick, and where they fall in its window.
+struct Run {
+    input: u32,
+    samples: Vec<f32>,
+    /// The window index of the first sample, which may be past its end.
+    lands: usize,
+    /// Where `sound::place` puts them in the window and how much they fill;
+    /// none when they start past its end.
+    placed: Option<(usize, usize)>,
+}
+
 impl Compose {
+    /// One frame of the clock, in its pts: the frame's duration, else the
+    /// rate `v` was bound at, else the spacing of the clock's frames.
+    fn step(&self, duration: Option<i64>) -> Option<i64> {
+        duration.filter(|d| *d > 0).or(self.step).or(self.learned)
+    }
+
+    /// Takes the clock's frame at `pts`. Where it follows the last frame,
+    /// later and by no more than a jump, the spacing from the last, per
+    /// tick between them, is the learned step, so a change of rate is
+    /// followed. Answers whether it follows.
+    fn learn(&mut self, tick: &Tick, pts: i64) -> bool {
+        let ordinal = tick.ordinal();
+        let follows = self.last_frame.is_some_and(|(last, _)| {
+            pts > last && seconds_of(pts - last, tick.time_base()) <= MAX_STEP_SECONDS
+        });
+        if follows
+            && let Some((last, then)) = self.last_frame
+            && ordinal > then
+        {
+            let step = (pts - last) / (ordinal - then) as i64;
+            if step > 0 {
+                self.learned = Some(step);
+            }
+        }
+        self.last_frame = Some((pts, ordinal));
+        follows
+    }
+
     /// The tick's sound on `audio`: the output samples from the tick's time
     /// to the next tick's, each held input's run of samples placed where
     /// its feed's offset puts it and scaled by its elements' gains, ramped
     /// from the last tick's. Silence where nothing sounds.
-    fn sound(&mut self, tick: &Tick, pts: i64, duration: Option<i64>, out: &mut Out) -> Result<()> {
+    ///
+    /// The run starts where the last one ended, so the runs meet. Where
+    /// that is before the tick's time (after the first frame, whose step is
+    /// not known, or a frame later than the last one's step said), the
+    /// samples between are what the last tick's runs held past its window,
+    /// at its gains. Where it is after, the tick's first samples were
+    /// written already and are left out. A frame that does not `follow`
+    /// the last starts afresh at its own time, and a tick of no samples
+    /// writes nothing.
+    fn sound(
+        &mut self,
+        tick: &Tick,
+        pts: i64,
+        duration: Option<i64>,
+        follows: bool,
+        out: &mut Out,
+    ) -> Result<()> {
         let clock = tick.time_base();
-        let step = duration.filter(|d| *d > 0).or(self.step).unwrap_or(1);
         let start = Time::of(pts, clock.num, clock.den);
-        let end = Time::of(pts + step, clock.num, clock.den);
+        // With no step known the tick's own window is empty: the next
+        // tick's run covers it.
+        let end = match self.step(duration) {
+            Some(step) => Time::of(pts + step, clock.num, clock.den),
+            None => start,
+        };
         let (first, len) = sound::window(start, end);
+        let begin = self
+            .ran_to
+            .filter(|to| follows && (first - to).abs() <= i64::from(sound::RATE))
+            .unwrap_or(first);
+        let before = usize::try_from(first - begin).unwrap_or(0);
+        let skip = usize::try_from(begin - first).unwrap_or(0).min(len);
         let t = seconds_of(pts, clock);
         let inputs = self.held.len() + 1;
         let mut sounding = vec![false; inputs];
-        let mut runs: Vec<(u32, Vec<f32>, usize, usize)> = Vec::new();
+        let mut runs: Vec<Run> = Vec::new();
         for (k, id) in self.sound.iter().enumerate() {
             let input = k as u32;
             let Some(id) = *id else {
@@ -900,18 +996,14 @@ impl Compose {
                 .collect();
             self.loudness.push(input, t, sound::rms_dbfs(&samples));
             let base = tick.info(id).time_base;
+            let base = (base.num, base.den);
             let count = samples.len() / sound::CHANNELS;
-            if let Some((at, fills)) = sound::place(
-                start,
-                end,
-                offset,
-                (base.num, base.den),
-                run.pts,
-                count,
-                len,
-            ) {
-                runs.push((input, samples, at, fills));
-            }
+            runs.push(Run {
+                input,
+                lands: sound::lands(start, offset, base, run.pts),
+                placed: sound::place(start, end, offset, base, run.pts, count, len),
+                samples,
+            });
         }
         let voices = self.session.compositor().voices();
         let loudness = &self.loudness;
@@ -927,17 +1019,70 @@ impl Compose {
             .unwrap_or_else(|| gains.clone());
         let parts: Vec<Part> = runs
             .iter()
-            .map(|(input, samples, at, fills)| Part {
-                samples,
-                at: *at,
-                fills: *fills,
-                from: last[*input as usize],
-                to: gains[*input as usize],
+            .filter_map(|run| {
+                let (at, fills) = run.placed?;
+                Some(Part {
+                    samples: &run.samples,
+                    at,
+                    fills,
+                    from: last[run.input as usize],
+                    to: gains[run.input as usize],
+                })
             })
             .collect();
-        let mixed = sound::mix(len, &parts);
+        let own = sound::mix(len, &parts);
+        // The samples from where the last run ended to the tick's time: what
+        // the last tick's runs held past its window.
+        let carried: Vec<Part> = self
+            .carried
+            .iter()
+            .filter_map(|c| {
+                let frames = c.samples.len() / sound::CHANNELS;
+                // Any from before `begin` were written already.
+                let gone = usize::try_from(begin - c.at).unwrap_or(0);
+                let at = usize::try_from(c.at - begin).unwrap_or(0);
+                (gone < frames && at < before).then(|| Part {
+                    samples: &c.samples[gone * sound::CHANNELS..],
+                    at,
+                    fills: (frames - gone).min(before - at),
+                    from: c.from,
+                    to: c.to,
+                })
+            })
+            .collect();
+        let mut mixed = sound::mix(before, &carried);
+        mixed.extend_from_slice(&own[skip * sound::CHANNELS..]);
+        // What this tick's runs hold past its window is heard at this
+        // tick's gains: at its new ones, the ramp done, or across the ramp
+        // where the window was empty and the ramp not heard.
+        let carried_gains = |input: u32| {
+            let to = gains[input as usize];
+            (if len == 0 { last[input as usize] } else { to }, to)
+        };
+        self.carried = runs
+            .into_iter()
+            .filter_map(|run| {
+                let frames = run.samples.len() / sound::CHANNELS;
+                let (used, at) = match run.placed {
+                    Some((at, fills)) => (fills.min(frames), at + fills),
+                    None => (0, run.lands),
+                };
+                let (from, to) = carried_gains(run.input);
+                (used < frames).then(|| Carried {
+                    at: first + at as i64,
+                    samples: run.samples[used * sound::CHANNELS..].to_vec(),
+                    from,
+                    to,
+                })
+            })
+            .collect();
+        self.ran_to = Some(begin.max(first + len as i64));
+        let count = mixed.len() / sound::CHANNELS;
+        if count == 0 {
+            return Ok(());
+        }
         let bytes: Vec<u8> = mixed.iter().flat_map(|s| s.to_le_bytes()).collect();
-        out.frame("audio", first, Some(len as i64), bytes)?;
+        out.frame("audio", begin, Some(count as i64), bytes)?;
         Ok(())
     }
 }
