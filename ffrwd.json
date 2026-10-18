@@ -25,6 +25,7 @@
   ],
   "lib": {
     "compose": "src/blitz.sql",
+    "compose_av": "src/blitz.sql",
     "page": "src/blitz.sql"
   },
   "bin": {

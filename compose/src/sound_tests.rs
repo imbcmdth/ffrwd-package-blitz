@@ -1,0 +1,524 @@
+//! The held inputs' sound: where each run lands, and the mix the document's
+//! levels make of it. The clock is 60 frames a second, so a tick is 800
+//! samples at 48 kHz, and each input's samples are one value throughout, so
+//! a tick's output says the gains it was mixed at.
+
+use ffrwd_node::mock::{Harness, Tick as Mock};
+use ffrwd_node::{BoundStream, Feed, FeedStart, Format, Pairing, Payload, Rational, Runner};
+
+use super::*;
+
+const TB: Rational = Rational::new(1, 60);
+/// The samples one tick holds.
+const N: usize = 800;
+const W: u32 = 16;
+const H: u32 = 9;
+
+/// The picture streams are 10 on and their sound 30 on, input 1 first.
+fn picture_id(input: u32) -> u32 {
+    9 + input
+}
+
+fn sound_id(input: u32) -> u32 {
+    29 + input
+}
+
+/// `held` inputs, the first `heard` of them with sound.
+fn streams(held: u32, heard: u32) -> Vec<BoundStream> {
+    let mut bound = vec![BoundStream::video("v", 0, W, H, "rgba", TB).rate(Rational::new(60, 1))];
+    for input in 1..=held {
+        bound.push(BoundStream::video(
+            "inputs",
+            picture_id(input),
+            W,
+            H,
+            "rgba",
+            TB,
+        ));
+    }
+    for input in 1..=heard {
+        bound.push(BoundStream::audio(
+            "audio",
+            sound_id(input),
+            sound::RATE,
+            2,
+            "f32",
+        ));
+    }
+    bound
+}
+
+fn open(html: &str, rows: &str, held: u32, heard: u32) -> Harness<Compose> {
+    let mut p = serde_json::json!({ "html": html, "lead": 0 });
+    if !rows.is_empty() {
+        p["rows"] = rows.into();
+    }
+    Harness::<Compose>::new(&p.to_string(), streams(held, heard)).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The document: input `k` drawn by `<img id="i{k}" src="ffrwd:{k}">`
+/// with the given extra attributes.
+fn doc(elements: &str) -> String {
+    format!(
+        "<style>html, body {{ margin: 0 }} img {{ position: absolute; width: 4px; height: 4px; }}
+.quiet {{ --ffrwd-volume: 0 }} .hide {{ display: none }}</style><img src=\"ffrwd:0\">{elements}"
+    )
+}
+
+/// A feed that shows from tick `at`, its source counting from 0.
+fn feed(at: i64) -> Feed {
+    Feed {
+        start: FeedStart {
+            tags: Vec::new(),
+            first_pts: 0,
+            at,
+            known: at,
+        },
+        ends: None,
+    }
+}
+
+fn samples(value: f32, frames: usize) -> Vec<u8> {
+    std::iter::repeat_n(value, frames * 2)
+        .flat_map(f32::to_le_bytes)
+        .collect()
+}
+
+/// Tick `k`, with each `(input, value)` present since tick 0, its picture
+/// shown and its sound (where the call binds it) one value for the tick.
+fn tick(h: &Harness<Compose>, k: i64, present: &[(u32, f32)], heard: u32) -> Mock {
+    let mut t = h.tick(k).frame(0, k, vec![0; (W * H * 4) as usize]);
+    for &(input, value) in present {
+        t = t.feed(picture_id(input), feed(0)).frame(
+            picture_id(input),
+            k,
+            vec![255; (W * H * 4) as usize],
+        );
+        if input <= heard {
+            t = t.feed(sound_id(input), feed(0)).frame(
+                sound_id(input),
+                k * N as i64,
+                samples(value, N),
+            );
+        }
+    }
+    t
+}
+
+/// What left on `audio`: its pts and samples, left channel.
+fn heard(emitted: &ffrwd_node::Emitted) -> (i64, Vec<f32>) {
+    match emitted.on("audio").as_slice() {
+        [
+            Payload::Frame {
+                pts,
+                duration,
+                data,
+            },
+        ] => {
+            let all: Vec<f32> = data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            assert_eq!(*duration, Some((all.len() / 2) as i64));
+            (*pts, all.iter().step_by(2).copied().collect())
+        }
+        other => panic!("one run of samples leaves a tick, not {other:?}"),
+    }
+}
+
+/// The level each tick's output ends on, over `ticks`, for inputs present
+/// as `present(k)` says.
+fn levels(
+    h: &mut Harness<Compose>,
+    ticks: std::ops::Range<i64>,
+    heard_inputs: u32,
+    present: &dyn Fn(i64) -> Vec<(u32, f32)>,
+) -> Vec<f32> {
+    ticks
+        .map(|k| {
+            let emitted = h.process(&tick(h, k, &present(k), heard_inputs)).unwrap();
+            let (pts, out) = heard(&emitted);
+            assert_eq!((pts, out.len()), (k * N as i64, N), "tick {k}");
+            (out[N - 1] * 1e4).round() / 1e4
+        })
+        .collect()
+}
+
+fn near(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-4
+}
+
+#[test]
+fn sound_groups_the_held_inputs_and_leaves_a_call_without_it_as_it_was() {
+    let shape = |bound: &[&str]| {
+        let bound: Vec<String> = bound.iter().map(|b| b.to_string()).collect();
+        Runner::<Compose>::shape("", &bound).unwrap()
+    };
+    let today = shape(&["v", "inputs"]);
+    assert!(today.pure && today.find_output("audio").is_none());
+    let Pairing::Hold(hold) = &today.find_input("inputs").unwrap().pairing else {
+        panic!("inputs are held")
+    };
+    assert_eq!(hold.group, None, "no sound, no group");
+
+    let s = shape(&["v", "inputs", "audio"]);
+    assert!(!s.pure, "the gates and ramps carry from tick to tick");
+    let Pairing::Hold(pictures) = &s.find_input("inputs").unwrap().pairing else {
+        panic!("inputs are held")
+    };
+    let audio = s.find_input("audio").unwrap();
+    let Pairing::Hold(sound) = &audio.pairing else {
+        panic!("audio is held")
+    };
+    assert_eq!(pictures.group.as_deref(), Some(GROUP));
+    assert_eq!(sound.group.as_deref(), Some(GROUP));
+    assert_eq!(sound.port_param.as_deref(), Some("audio_port"));
+    assert_eq!(
+        (sound.anchor.clone(), sound.lead, sound.timeout),
+        (pictures.anchor.clone(), pictures.lead, pictures.timeout)
+    );
+    assert!(audio.many && !audio.required);
+    assert_eq!(audio.accepts.sample_formats, ["f32"]);
+    assert_eq!(audio.accepts.sample_rates, [48_000]);
+    assert_eq!(audio.accepts.channel_counts, [2]);
+    let out = s.find_output("audio").unwrap();
+    assert!(matches!(
+        &out.format,
+        Some(Format::Audio(a)) if a.sample_rate == 48_000 && a.channels == 2 && a.sample_fmt == "f32"
+    ));
+    assert_eq!(out.time_base, Some(Rational::new(1, 48_000)));
+    assert!(s.find_output("video").is_some());
+
+    let bound: Vec<String> = ["audio"].iter().map(|b| b.to_string()).collect();
+    let err = Runner::<Compose>::shape(r#"{"width":32,"height":18}"#, &bound).unwrap_err();
+    assert!(err.contains("bind `v`"), "{err}");
+}
+
+#[test]
+fn a_lateral_s_sound_is_matched_to_its_picture_by_port() {
+    let p: Params = serde_json::from_str(r#"{"fps":30,"lead":0.3,"linger":0,"timeout":1,"presence":"","port":[9001,9002,9003],"audio_port":[9003,9001]}"#).unwrap();
+    assert_eq!(sound_of(&p, 2, 3).unwrap(), [2, 0]);
+    let p: Params =
+        serde_json::from_str(r#"{"fps":30,"lead":0.3,"linger":0,"timeout":1,"presence":""}"#)
+            .unwrap();
+    assert_eq!(sound_of(&p, 2, 3).unwrap(), [0, 1], "by place");
+    assert!(sound_of(&p, 4, 3).is_err());
+}
+
+#[test]
+fn every_tick_has_its_samples_and_the_ticks_meet() {
+    let mut h = open(&doc(r#"<img src="ffrwd:1">"#), "", 1, 1);
+    let mut next = 0;
+    for k in 0..6 {
+        let present = if (2..4).contains(&k) {
+            vec![(1, 0.25)]
+        } else {
+            vec![]
+        };
+        let (pts, out) = heard(&h.process(&tick(&h, k, &present, 1)).unwrap());
+        assert_eq!((pts, out.len()), (next, N), "tick {k}");
+        next = pts + N as i64;
+        match k {
+            2 => assert!(
+                out[N - 1] == 0.25 && out.windows(2).all(|w| w[1] >= w[0]),
+                "tick 2: the gate opening ramps the input in"
+            ),
+            3 => assert!(out.iter().all(|s| *s == 0.25), "tick 3: the input"),
+            _ => assert!(
+                out.iter().all(|s| *s == 0.0),
+                "tick {k}: silence while away"
+            ),
+        }
+    }
+}
+
+#[test]
+fn a_run_lands_where_its_picture_s_offset_puts_it() {
+    // The picture counts in 1/30 and its feed's first frame, pts 50, stands
+    // at tick 120 (2 s): the source's 1.667 s is the clock's 2 s. The sound
+    // counts in samples from the same origin, so at tick 150 the host hands
+    // the samples from 1.667 + 0.5 s, and they land at the window's start.
+    let mut bound = streams(0, 0);
+    bound.push(BoundStream::video(
+        "inputs",
+        10,
+        W,
+        H,
+        "rgba",
+        Rational::new(1, 30),
+    ));
+    bound.push(BoundStream::audio("audio", 30, sound::RATE, 2, "f32"));
+    let p = serde_json::json!({"html": doc(r#"<img src="ffrwd:1">"#)});
+    let mut h = Harness::<Compose>::new(&p.to_string(), bound).unwrap();
+    let start = |first_pts| Feed {
+        start: FeedStart {
+            tags: Vec::new(),
+            first_pts,
+            at: 120,
+            known: 120,
+        },
+        ends: None,
+    };
+    let source = (5 * sound::RATE / 3) as i64 + sound::RATE as i64 / 2;
+    let late = 100;
+    let at = |h: &Harness<Compose>, run_pts: i64| {
+        h.tick(150)
+            .frame(0, 150, vec![0; (W * H * 4) as usize])
+            .feed(10, start(50))
+            .frame(10, 65, vec![255; (W * H * 4) as usize])
+            .feed(30, start(80_000))
+            .frame(30, run_pts, samples(0.5, N - (run_pts - source) as usize))
+    };
+    let (pts, out) = heard(&h.process(&at(&h, source)).unwrap());
+    assert_eq!(pts, 150 * N as i64);
+    assert!(
+        out.iter().all(|s| *s == 0.5),
+        "on time, the window's first sample on"
+    );
+    let (_, out) = heard(&h.process(&at(&h, source + late)).unwrap());
+    assert!(out[..late as usize].iter().all(|s| *s == 0.0));
+    assert!(
+        out[late as usize..].iter().all(|s| *s == 0.5),
+        "a run starting late, from where it starts"
+    );
+}
+
+#[test]
+fn an_element_with_no_volume_is_at_1_and_two_of_one_input_add() {
+    let mut h = open(&doc(r#"<img src="ffrwd:1">"#), "", 1, 1);
+    assert_eq!(levels(&mut h, 0..2, 1, &|_| vec![(1, 0.3)]), [0.3, 0.3]);
+    let mut h = open(
+        &doc(r#"<img src="ffrwd:1"><img src="ffrwd:1" style="--ffrwd-volume: 0.5">"#),
+        "",
+        1,
+        1,
+    );
+    assert_eq!(levels(&mut h, 0..2, 1, &|_| vec![(1, 0.3)]), [0.45, 0.45]);
+    let mut h = open(
+        &doc(r#"<img src="ffrwd:1" style="--ffrwd-volume: 4">"#),
+        "",
+        1,
+        1,
+    );
+    assert_eq!(
+        levels(&mut h, 0..1, 1, &|_| vec![(1, 0.3)]),
+        [1.0],
+        "clamped to the sample range"
+    );
+}
+
+#[test]
+fn two_inputs_mix_at_their_volumes_and_a_row_changes_one_with_a_ramp() {
+    // #i1 at 1 and #i2 at 0.5: 0.2 + 0.4 x 0.5 = 0.4. A row at 0.08 s, due
+    // on tick 5, makes #i1 quiet: 0.2 from there, ramped across tick 5.
+    let html = doc(
+        r#"<img id="i1" src="ffrwd:1"><img id="i2" src="ffrwd:2" style="--ffrwd-volume: 0.5">"#,
+    );
+    let rows = r##"{"at": 0.08, "select": "#i1", "change": "+quiet"}"##;
+    let mut h = open(&html, rows, 2, 2);
+    let both = |_| vec![(1, 0.2), (2, 0.4)];
+    for k in 0..5 {
+        let (_, out) = heard(&h.process(&tick(&h, k, &both(k), 2)).unwrap());
+        assert!(out.iter().all(|s| near(*s, 0.4)), "tick {k}");
+    }
+    let (_, ramp) = heard(&h.process(&tick(&h, 5, &both(5), 2)).unwrap());
+    assert!(near(ramp[0], 0.4 - 0.2 / N as f32), "the ramp's first step");
+    assert!(near(ramp[N / 2 - 1], 0.3), "halfway");
+    assert!(near(ramp[N - 1], 0.2), "the new level by the tick's end");
+    assert!(ramp.windows(2).all(|w| w[1] <= w[0]), "no step");
+    assert_eq!(levels(&mut h, 6..8, 2, &both), [0.2, 0.2]);
+}
+
+#[test]
+fn a_hidden_element_still_sounds() {
+    let rows = r##"{"at": 0.03, "select": "#i1", "change": "+hide"}"##;
+    let mut h = open(&doc(r#"<img id="i1" src="ffrwd:1">"#), rows, 1, 1);
+    assert_eq!(
+        levels(&mut h, 0..4, 1, &|_| vec![(1, 0.3)]),
+        [0.3, 0.3, 0.3, 0.3],
+        "display: none from tick 2 on"
+    );
+    let rows = r##"{"at": 0.03, "select": "#box", "change": "+hide"}"##;
+    let html = doc(r#"<div id="box"><img src="ffrwd:1" style="--ffrwd-volume: 0.5"></div>"#);
+    let mut h = open(&html, rows, 1, 1);
+    assert_eq!(
+        levels(&mut h, 0..4, 1, &|_| vec![(1, 0.3)]),
+        [0.15, 0.15, 0.15, 0.15],
+        "inside a box hidden from tick 2 on"
+    );
+    let html = doc(r#"<div class="hide"><img src="ffrwd:1" style="--ffrwd-volume: 0.5"></div>"#);
+    let mut h = open(&html, "", 1, 1);
+    assert_eq!(
+        levels(&mut h, 0..2, 1, &|_| vec![(1, 0.3)]),
+        [0.15, 0.15],
+        "inside a box hidden from the start"
+    );
+}
+
+/// Main (input 1) at 1, ducking to 0.5; the cam (input 2) as `cam` says.
+fn ducking(cam: &str) -> String {
+    doc(&format!(
+        r#"<img id="i1" src="ffrwd:1" style="--ffrwd-volume-duck: 0.5"><img id="i2" src="ffrwd:2" {cam}>"#
+    ))
+}
+
+#[test]
+fn main_ducks_while_a_cam_sounds_and_comes_back_when_it_drops() {
+    // Main at 0.1, the cam at 0.2, present on ticks 2 to 4.
+    let mut h = open(&ducking(""), "", 2, 2);
+    let present = |k: i64| {
+        let mut p = vec![(1, 0.1)];
+        if (2..5).contains(&k) {
+            p.push((2, 0.2));
+        }
+        p
+    };
+    assert_eq!(
+        levels(&mut h, 0..7, 2, &present),
+        [0.1, 0.1, 0.25, 0.25, 0.25, 0.1, 0.1],
+        "0.1 alone, 0.1 x 0.5 + 0.2 with the cam"
+    );
+}
+
+#[test]
+fn a_cam_at_0_or_without_sound_ducks_nothing_and_no_duck_is_no_change() {
+    let both = |_| vec![(1, 0.1), (2, 0.2)];
+    let mut h = open(&ducking(r#"class="quiet""#), "", 2, 2);
+    assert_eq!(levels(&mut h, 0..2, 2, &both), [0.1, 0.1], "a cam at 0");
+    let mut h = open(&ducking(""), "", 2, 1);
+    assert_eq!(
+        levels(&mut h, 0..2, 1, &both),
+        [0.1, 0.1],
+        "a picture-only cam at 1"
+    );
+    let html = doc(r#"<img id="i1" src="ffrwd:1"><img id="i2" src="ffrwd:2">"#);
+    let mut h = open(&html, "", 2, 2);
+    assert_eq!(levels(&mut h, 0..2, 2, &both), [0.3, 0.3], "no duck at all");
+}
+
+#[test]
+fn two_ducking_elements_duck_each_other() {
+    let mut h = open(&ducking(r#"style="--ffrwd-volume-duck: 0.25""#), "", 2, 2);
+    assert_eq!(
+        levels(&mut h, 0..2, 2, &|_| vec![(1, 0.4), (2, 0.4)]),
+        [0.3, 0.3],
+        "0.4 x 0.5 + 0.4 x 0.25"
+    );
+}
+
+#[test]
+fn a_track_below_its_squelch_is_silent_and_ducks_nobody_until_it_is_loud() {
+    // The cam at -60 dBFS (0.001), then at 0.2 on ticks 3 and 4, then
+    // silent; main at 0.1. Its gate opens on tick 3 and stays open for the
+    // release, 0.5 s (30 ticks), after tick 4: the cam quiet but heard and
+    // main ducked to tick 34, then the cam silent and main back.
+    let mut h = open(&ducking(""), "", 2, 2);
+    let cam = |k: i64| match k {
+        3 | 4 => 0.2,
+        _ if k < 3 => 0.001,
+        _ => 0.0,
+    };
+    let present = |k: i64| vec![(1, 0.1), (2, cam(k))];
+    let got = levels(&mut h, 0..40, 2, &present);
+    assert_eq!(
+        &got[..3],
+        [0.1, 0.1, 0.1],
+        "a quiet cam is silent and ducks nobody"
+    );
+    assert_eq!(
+        &got[3..5],
+        [0.25, 0.25],
+        "loud: heard, and main ducked from that tick"
+    );
+    assert!(
+        got[5..35].iter().all(|l| near(*l, 0.05)),
+        "the release holds the duck: {got:?}"
+    );
+    assert!(
+        got[35..].iter().all(|l| near(*l, 0.1)),
+        "past it, main is back: {got:?}"
+    );
+}
+
+#[test]
+fn the_release_keeps_a_gate_open_across_a_short_pause() {
+    // The cam loud, silent for 0.2 s (12 ticks), loud again: main stays
+    // ducked throughout.
+    let mut h = open(&ducking(""), "", 2, 2);
+    let cam = |k: i64| if (2..14).contains(&k) { 0.0 } else { 0.2 };
+    let got = levels(&mut h, 0..20, 2, &|k| vec![(1, 0.1), (2, cam(k))]);
+    assert!(
+        got.iter().all(|l| near(*l, 0.05) || near(*l, 0.25)),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn a_squelch_of_a_track_s_own_decides_what_crosses_it() {
+    // 0.01 is -40 dBFS: under a squelch of -30, over one of -45.
+    let present = |_| vec![(1, 0.1), (2, 0.01)];
+    let mut h = open(&ducking(r#"style="--ffrwd-squelch: -30""#), "", 2, 2);
+    assert_eq!(levels(&mut h, 0..2, 2, &present), [0.1, 0.1]);
+    let mut h = open(&ducking(r#"style="--ffrwd-squelch: -45""#), "", 2, 2);
+    assert_eq!(levels(&mut h, 0..2, 2, &present), [0.06, 0.06]);
+}
+
+#[test]
+fn a_track_with_no_squelch_is_always_heard_and_ducks_on_presence() {
+    let mut h = open(&ducking(r#"style="--ffrwd-squelch: none""#), "", 2, 2);
+    let got = levels(&mut h, 0..4, 2, &|k| {
+        let mut p = vec![(1, 0.1)];
+        if k >= 2 {
+            p.push((2, 0.0005));
+        }
+        p
+    });
+    assert_eq!(got, [0.1, 0.1, 0.0505, 0.0505]);
+}
+
+#[test]
+fn a_background_of_an_input_sounds_as_an_img_does() {
+    for html in [
+        r#"<div style="width:4px;height:4px;background-image:url(ffrwd:1)"></div>"#,
+        r#"<div class="hide" style="width:4px;height:4px;background-image:url(ffrwd:1)"></div>"#,
+    ] {
+        let mut h = open(&doc(html), "", 1, 1);
+        assert_eq!(
+            levels(&mut h, 0..2, 1, &|_| vec![(1, 0.3)]),
+            [0.3, 0.3],
+            "{html}"
+        );
+    }
+}
+
+#[test]
+fn the_programme_s_sound_is_input_0_s_and_a_feed_follows_its_format() {
+    let bound: Vec<String> = ["v", "inputs", "audio", "a"]
+        .iter()
+        .map(|b| b.to_string())
+        .collect();
+    let s = Runner::<Compose>::shape("", &bound).unwrap();
+    assert!(!s.pure);
+    let a = s.find_input("a").unwrap();
+    assert!(matches!(a.pairing, Pairing::Lockstep) && !a.required);
+    assert_eq!(a.accepts.sample_rates, [48_000]);
+    let audio = s.find_input("audio").unwrap();
+    assert_eq!(
+        audio.accepts.like.as_deref(),
+        Some("a"),
+        "a port's feed is conformed to `a`"
+    );
+
+    // `a` at 0.1 under the document's <img src="ffrwd:0">, input 1 at 0.2.
+    let mut bound = streams(1, 1);
+    bound.push(BoundStream::audio("a", 5, sound::RATE, 2, "f32"));
+    let p = serde_json::json!({"html": doc(r#"<img src="ffrwd:1">"#)});
+    let mut h = Harness::<Compose>::new(&p.to_string(), bound).unwrap();
+    for k in 0..3 {
+        let t = tick(&h, k, &[(1, 0.2)], 1).frame(5, k * N as i64, samples(0.1, N));
+        let (_, out) = heard(&h.process(&t).unwrap());
+        assert!(near(out[N - 1], 0.3), "tick {k}: {}", out[N - 1]);
+    }
+}

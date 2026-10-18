@@ -1,7 +1,8 @@
--- The two exports, hosted as the one node module the package ships. A
+-- The three exports, hosted as the one node module the package ships. A
 -- node's ports follow from its params and from the inputs a call binds, so
--- `compose`, clocked by its picture, and `page`, a source with a clock of
--- its own, are one module declared twice.
+-- `compose`, clocked by its picture, `compose_av`, the same with its held
+-- inputs' sound, and `page`, a source with a clock of its own, are one
+-- module declared three times.
 --
 -- The value parameters:
 --   html        the document, as HTML text; '' is input 0 over the frame.
@@ -65,6 +66,46 @@ CREATE FUNCTION compose(v video_stream,
                         renderer text DEFAULT 'auto',
                         log text DEFAULT 'off')
 RETURNS video_stream
+  AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
+
+-- `compose_av` is `compose` with the held inputs' sound: `audio` takes
+-- each held input's sound in `inputs` order, `audio => ARRAY[m.audio]` for
+-- the first alone, and the call makes two outputs, read off it by name,
+-- `.video` and `.audio`, or both at once with `.*` in a WITH body. A held
+-- input's picture and sound are one hold group, so the host times both by
+-- the picture's offset and they keep their sync through drops and
+-- rejoins. A run-time lateral's sound is fed on its picture's port, which
+-- the compiler writes into `audio_port`; a sound fed on a port is conformed
+-- to `a`, so a call over laterals binds `a`. `a` is `v`'s own sound, input
+-- 0's, in step with `v`: a silent source where `v` has none. `audio` is 48 kHz stereo on
+-- every frame of `v`: each element showing an input heard at its
+-- `--ffrwd-volume`, ducked to its `--ffrwd-volume-duck` while another
+-- input plays, gated by its `--ffrwd-squelch`, and summed (see the
+-- README). A call with sound runs on one worker.
+CREATE FUNCTION compose_av(v video_stream,
+                           inputs video_stream[] DEFAULT NULL,
+                           audio audio_stream[] DEFAULT NULL,
+                           a audio_stream DEFAULT NULL,
+                           changes STRUCT(at number, "select" text, change text,
+                                          text text, html text)[][] DEFAULT NULL,
+                           html text DEFAULT '',
+                           rows text DEFAULT '',
+                           width number DEFAULT NULL,
+                           height number DEFAULT NULL,
+                           css_width number DEFAULT NULL,
+                           css_height number DEFAULT NULL,
+                           fit text DEFAULT 'contain',
+                           bypass boolean DEFAULT true,
+                           port number DEFAULT NULL,
+                           audio_port number DEFAULT NULL,
+                           lead number DEFAULT 0.3,
+                           linger number DEFAULT 0,
+                           timeout number DEFAULT 1,
+                           latency number DEFAULT NULL,
+                           presence text DEFAULT '',
+                           renderer text DEFAULT 'auto',
+                           log text DEFAULT 'off')
+RETURNS STRUCT(video video_stream, audio audio_stream)
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
 -- `page` renders the document `fps` times a second on a `width` x `height`

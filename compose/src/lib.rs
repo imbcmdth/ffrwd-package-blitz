@@ -19,6 +19,14 @@
 //! module or out of it.
 //! On the CPU a yuv420p picture is fetched as it is and converted to rgba
 //! here, in its stream's matrix and range.
+//!
+//! `audio` is the held inputs' sound, in `inputs` order, or matched by port
+//! where the compiler wrote both port lists. When the call binds it, the
+//! pictures and the sound are one hold group, so each input's picture and
+//! sound share the host's one offset, and the node emits `audio` on every
+//! tick: each element's input's samples at the element's levels, summed
+//! (see `compose_core::sound`). The gates and the ramps carry state from
+//! tick to tick, so a call with sound runs on one instance.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -28,13 +36,14 @@ use std::sync::Arc;
 use compose_core::gpu::{MAX_PICTURE, Matrix};
 use compose_core::params::{Log, Params as Document, Renderer};
 use compose_core::presence::{self, Clock, Entry, Presence, Seen};
+use compose_core::sound::{self, Loudness, Offset, Part, Time};
 use compose_core::{
     Colour, Gpu, MAX_INPUTS, Output as Made, Picture, RasterImageData, Session, bit,
 };
 use ffrwd_frame::yuv;
 use ffrwd_node::{
-    Anchor, Bound, BoundStream, Frame, Init, Input, Node, Out, Output, Rational, Result, Shape,
-    StateRow, Tick,
+    Anchor, AudioFormat, Bound, BoundStream, Feed, Frame, Init, Input, Node, Out, Output, Rational,
+    Result, Shape, StateRow, Tick,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -65,7 +74,7 @@ mod frames {
     }
 }
 
-const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
+const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"audio_port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
 /// What `changes` reads: rows with a selector. The rest of a row is read
 /// when it is applied, and a row that does not read is logged.
@@ -79,6 +88,13 @@ const TIMED_TAG: &str = "smart_timed";
 const PIXEL_FORMAT: &str = "rgba";
 
 const YUV420P: &str = "yuv420p";
+
+/// The hold group the held pictures and their sound share when the call
+/// binds `audio`: one offset per connection, the picture's.
+const GROUP: &str = "held";
+
+/// The sound's sample format, in and out.
+const SAMPLE_FORMAT: &str = "f32";
 
 /// What a video input is taken as: rgba, or yuv420p, which the module
 /// converts (on the device when its frames are held there). The compiler
@@ -99,6 +115,9 @@ pub struct Params {
     /// The loopback ports the held inputs are given on, one each in
     /// `inputs` order, or one port alone; the host reads them.
     port: Option<Value>,
+    /// The loopback ports of `audio`, as `port` is for `inputs`. A run-time
+    /// lateral's sound is on the port of its picture.
+    audio_port: Option<Value>,
     lead: f64,
     linger: f64,
     timeout: f64,
@@ -126,6 +145,39 @@ fn seconds_of(pts: i64, base: Rational) -> f64 {
 
 fn positive(seconds: f64) -> Option<f64> {
     (seconds > 0.0).then_some(seconds)
+}
+
+/// A port param as the list of ports it names: a list, or one port.
+fn ports(value: &Option<Value>) -> Vec<u64> {
+    match value {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_u64).collect(),
+        Some(v) => v.as_u64().into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Which held input each stream of `audio` is the sound of, as indices
+/// into `inputs`: the input on the same port where both port lists name
+/// it (a run-time lateral's picture and sound share one), and otherwise
+/// the input in the same place.
+fn sound_of(params: &Params, sounds: usize, held: usize) -> Result<Vec<usize>, String> {
+    let (pictures, heard) = (ports(&params.port), ports(&params.audio_port));
+    (0..sounds)
+        .map(|j| {
+            let k = heard
+                .get(j)
+                .and_then(|port| pictures.iter().position(|p| p == port))
+                .unwrap_or(j);
+            if k < held {
+                Ok(k)
+            } else {
+                Err(format!(
+                    "`audio` stream {} has no held input to be the sound of: the call holds {held}",
+                    j + 1
+                ))
+            }
+        })
+        .collect()
 }
 
 /// The GPU the host offers: wgpu over wasi:webgpu. On any other target
@@ -209,6 +261,15 @@ pub struct Compose {
     v: Option<u32>,
     /// The streams of `inputs`, input 1 on.
     held: Vec<u32>,
+    /// Each input's sound stream, input 0 (`v`, whose sound is `a`) on;
+    /// none for an input whose sound the call does not bind. Empty for a
+    /// call with no sound.
+    sound: Vec<Option<u32>>,
+    /// Each input's level on recent ticks, for the gates.
+    loudness: Loudness,
+    /// Each input's gain on the last tick, where the next tick's ramp
+    /// starts.
+    gains: Option<Vec<f32>>,
     bases: HashMap<u32, Rational>,
     session: Session,
     presence: Presence,
@@ -387,6 +448,17 @@ impl Node for Compose {
         if clocked && (params.port.is_some() || bound.has("inputs")) {
             held = held.port_param("port");
         }
+        let programme = bound.has("a");
+        let heard = bound.has("audio") || programme;
+        if heard && !clocked {
+            return Err(
+                "sound is timed by the pictures it is the sound of, and a page holds none: bind `v`"
+                    .into(),
+            );
+        }
+        if bound.has("audio") {
+            held = held.group(GROUP);
+        }
         let mut changes = Input::rows("changes")
             .optional()
             .many()
@@ -427,7 +499,51 @@ impl Node for Compose {
                 .bounded(false);
         }
         shape = shape.input(held).input(changes);
-        Ok(shape.pure())
+        if !heard {
+            return Ok(shape.pure());
+        }
+        let conformed = |input: Input| {
+            input
+                .sample_formats(&[SAMPLE_FORMAT])
+                .sample_rates(&[sound::RATE])
+                .channel_counts(&[sound::CHANNELS as u32])
+        };
+        if programme {
+            shape = shape.input(conformed(Input::audio("a").optional()));
+        }
+        if bound.has("audio") {
+            let mut audio = conformed(
+                Input::audio("audio")
+                    .optional()
+                    .many()
+                    .anchor(Anchor::Tagged(TIMED_TAG.to_owned()))
+                    .lead(params.lead)
+                    .group(GROUP)
+                    .port_param("audio_port"),
+            );
+            // A port's feed is conformed to the input it follows.
+            if programme {
+                audio = audio.like("a");
+            }
+            if let Some(linger) = positive(params.linger) {
+                audio = audio.linger(linger);
+            }
+            if let Some(timeout) = positive(params.timeout) {
+                audio = audio.timeout(timeout);
+            }
+            shape = shape.input(audio);
+        }
+        // Not pure: the gates and the ramps carry from tick to tick.
+        Ok(shape.output(
+            Output::audio("audio")
+                .audio_format(AudioFormat {
+                    sample_rate: sound::RATE,
+                    channels: sound::CHANNELS as u32,
+                    sample_fmt: SAMPLE_FORMAT.to_owned(),
+                    channel_layout: Some("stereo".to_owned()),
+                })
+                .time_base(Rational::new(1, sound::RATE as i32)),
+        ))
     }
 
     fn init(params: Params, init: &Init) -> Result<Compose> {
@@ -473,6 +589,43 @@ impl Node for Compose {
         let out = given_size(&doc)
             .or(sizes[0])
             .ok_or("compose has no picture to take its size from: give it width and height")?;
+        let programme = init.optional("a");
+        let heard: Vec<&BoundStream> = init.streams("audio");
+        let mut sound = if heard.is_empty() && programme.is_none() {
+            Vec::new()
+        } else {
+            vec![None; held.len() + 1]
+        };
+        let places = sound_of(&params, heard.len(), held.len())?;
+        let streams = programme
+            .into_iter()
+            .map(|a| (a, 0))
+            .chain(heard.iter().copied().zip(places.into_iter().map(|k| k + 1)));
+        for (stream, k) in streams {
+            let format = stream
+                .audio_format()
+                .ok_or_else(|| format!("`{}` is an audio input", stream.port))?;
+            if (
+                format.sample_rate,
+                format.channels,
+                format.sample_fmt.as_str(),
+            ) != (sound::RATE, sound::CHANNELS as u32, SAMPLE_FORMAT)
+            {
+                return Err(format!(
+                    "compose takes sound as {} Hz, {} channels, {SAMPLE_FORMAT}, and `{}` is {} Hz, {} channels, {}",
+                    sound::RATE,
+                    sound::CHANNELS,
+                    stream.port,
+                    format.sample_rate,
+                    format.channels,
+                    format.sample_fmt
+                )
+                .into());
+            }
+            if sound[k].replace(stream.id).is_some() {
+                return Err(format!("two `audio` streams are the sound of input {k}").into());
+            }
+        }
         let held: Vec<u32> = held.iter().map(|s| s.id).collect();
         let watched = watched(&entries, &held)?;
         let bases = init
@@ -526,6 +679,9 @@ impl Node for Compose {
         Ok(Compose {
             v: v.map(|s| s.id),
             held,
+            sound,
+            loudness: Loudness::default(),
+            gains: None,
             bases,
             session,
             presence: Presence::new(entries),
@@ -680,6 +836,9 @@ impl Node for Compose {
                 out.frame("video", pts, duration, bytes)?;
             }
         }
+        if !self.sound.is_empty() {
+            self.sound(tick, pts, duration, out)?;
+        }
         for e in self.session.take_errors() {
             eprintln!("compose: row error: {e}");
         }
@@ -693,6 +852,119 @@ impl Node for Compose {
         }
         Ok(())
     }
+}
+
+impl Compose {
+    /// The tick's sound on `audio`: the output samples from the tick's time
+    /// to the next tick's, each held input's run of samples placed where
+    /// its feed's offset puts it and scaled by its elements' gains, ramped
+    /// from the last tick's. Silence where nothing sounds.
+    fn sound(&mut self, tick: &Tick, pts: i64, duration: Option<i64>, out: &mut Out) -> Result<()> {
+        let clock = tick.time_base();
+        let step = duration.filter(|d| *d > 0).or(self.step).unwrap_or(1);
+        let start = Time::of(pts, clock.num, clock.den);
+        let end = Time::of(pts + step, clock.num, clock.den);
+        let (first, len) = sound::window(start, end);
+        let t = seconds_of(pts, clock);
+        let inputs = self.held.len() + 1;
+        let mut sounding = vec![false; inputs];
+        let mut runs: Vec<(u32, Vec<f32>, usize, usize)> = Vec::new();
+        for (k, id) in self.sound.iter().enumerate() {
+            let input = k as u32;
+            let Some(id) = *id else {
+                continue;
+            };
+            // `a` is in step with the clock; a held input's sound is on its
+            // feed's offset while its feed shows.
+            let offset = match input {
+                0 => Offset(Time::ZERO),
+                _ => match tick.feed(id).filter(|f| f.start.at <= pts) {
+                    Some(feed) => offset_of(tick, self.held[k - 1], id, &feed),
+                    None => {
+                        self.loudness.push(input, t, f32::NEG_INFINITY);
+                        continue;
+                    }
+                },
+            };
+            sounding[input as usize] = true;
+            let Some(run) = tick.frame(id) else {
+                self.loudness.push(input, t, f32::NEG_INFINITY);
+                continue;
+            };
+            let samples: Vec<f32> = tick
+                .fetch(id, run.index)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect();
+            self.loudness.push(input, t, sound::rms_dbfs(&samples));
+            let base = tick.info(id).time_base;
+            let count = samples.len() / sound::CHANNELS;
+            if let Some((at, fills)) = sound::place(
+                start,
+                end,
+                offset,
+                (base.num, base.den),
+                run.pts,
+                count,
+                len,
+            ) {
+                runs.push((input, samples, at, fills));
+            }
+        }
+        let voices = self.session.compositor().voices();
+        let loudness = &self.loudness;
+        let gains = sound::gains(
+            &voices,
+            &|input| sounding.get(input as usize).copied().unwrap_or(false),
+            &|input, threshold, release| loudness.open(input, t, threshold, release),
+            inputs,
+        );
+        let last = self
+            .gains
+            .replace(gains.clone())
+            .unwrap_or_else(|| gains.clone());
+        let parts: Vec<Part> = runs
+            .iter()
+            .map(|(input, samples, at, fills)| Part {
+                samples,
+                at: *at,
+                fills: *fills,
+                from: last[*input as usize],
+                to: gains[*input as usize],
+            })
+            .collect();
+        let mixed = sound::mix(len, &parts);
+        let bytes: Vec<u8> = mixed.iter().flat_map(|s| s.to_le_bytes()).collect();
+        out.frame("audio", first, Some(len as i64), bytes)?;
+        Ok(())
+    }
+}
+
+/// How a held input's sound maps onto the clock: the offset the host fixed
+/// for its connection, from the lead's record (the picture's, or the
+/// sound's where the connection brings no picture). A source tagged
+/// `smart_timed=1` is on the clock's time and has none.
+fn offset_of(tick: &Tick, picture: u32, sound: u32, feed: &Feed) -> Offset {
+    let timed = feed
+        .start
+        .tags
+        .iter()
+        .any(|(k, v)| k == TIMED_TAG && v == "1");
+    if timed {
+        return Offset(Time::ZERO);
+    }
+    let clock = tick.time_base();
+    let (lead, start) = match tick.feed(picture) {
+        Some(shown) => (picture, shown.start),
+        None => (sound, feed.start.clone()),
+    };
+    let base = tick.info(lead).time_base;
+    Offset::between(
+        Time::of(start.first_pts, base.num, base.den),
+        Time::of(start.at, clock.num, clock.den),
+    )
 }
 
 /// ffrwd-frame's name for a colour: the same matrix and range.
@@ -733,3 +1005,6 @@ ffrwd_node::export!(Compose);
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod sound_tests;
