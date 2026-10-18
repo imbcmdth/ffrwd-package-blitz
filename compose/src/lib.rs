@@ -25,7 +25,7 @@
 //! pictures and the sound are one hold group, so each input's picture and
 //! sound share the host's one offset, and the node emits `audio` on every
 //! tick: each element's input's samples at the element's levels, summed
-//! (see `compose_core::sound`). The gates and the ramps carry state from
+//! (see `compose_core::sound`). The squelches and the ramps carry state from
 //! tick to tick, so a call with sound runs on one instance.
 
 use std::collections::HashMap;
@@ -265,7 +265,7 @@ pub struct Compose {
     /// none for an input whose sound the call does not bind. Empty for a
     /// call with no sound.
     sound: Vec<Option<u32>>,
-    /// Each input's level on recent ticks, for the gates.
+    /// Each input's level on recent ticks, for the squelches.
     loudness: Loudness,
     /// Each input's gain on the last tick, where the next tick's ramp
     /// starts.
@@ -533,7 +533,7 @@ impl Node for Compose {
             }
             shape = shape.input(audio);
         }
-        // Not pure: the gates and the ramps carry from tick to tick.
+        // Not pure: the squelches and the ramps carry from tick to tick.
         Ok(shape.output(
             Output::audio("audio")
                 .audio_format(AudioFormat {

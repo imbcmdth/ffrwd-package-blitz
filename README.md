@@ -281,24 +281,26 @@ inherit and change with classes like any CSS:
 - `--ffrwd-volume-duck`: the level the element drops to while an element
   of another input is playing. Unset, the element is never ducked. An
   element plays while its input is present and carries sound, its
-  `--ffrwd-volume` is above 0 and its gate (below) is open; its own duck
-  does not count, so two ducking elements duck each other. A held input
-  with no sound bound, or whose connection carries none, never plays.
+  `--ffrwd-volume` is above 0 and its squelch (below) lets it be heard;
+  its own duck does not count, so two ducking elements duck each other. A
+  held input with no sound bound, or whose connection carries none, never
+  plays.
   `#main { --ffrwd-volume: 1; --ffrwd-volume-duck: 0.5 }` holds the main
   feed at 1 alone and at 0.5 while a cam with sound is speaking.
-- `--ffrwd-squelch`: the element's gate, in dBFS, `-50` by default (near
-  silence). Each frame an input's level is the RMS of the samples it hands
-  for that frame, before any volume, over both channels: RMS follows
-  loudness, where a peak is set off by a single click. Above the squelch
-  the gate opens; it closes `--ffrwd-squelch-release` seconds (`0.5` by
-  default) after the level was last above it, so a pause between words
-  keeps it open. A closed gate silences the element, and the element does
-  not play, so it ducks nobody. `--ffrwd-squelch: none` takes the gate
-  away: the element is heard at its volume however quiet, and plays
-  whenever its input is present with sound. That is for programme sound,
-  such as a venue's game audio, whose quiet stretches the default would
-  cut; commentary gates by default. Deciding what plays by the level is a
-  first step; a voice detector may take its place later.
+- `--ffrwd-squelch`: the level, in dBFS, the element's input has to pass
+  to be heard, `-50` by default (near silence). Each frame an input's
+  level is the RMS of the samples it hands for that frame, before any
+  volume, over both channels: RMS follows loudness, where a peak is set off
+  by a single click. Above the squelch the element is heard; it is cut
+  again `--ffrwd-squelch-release` seconds (`0.5` by default) after the
+  level was last above it, so a pause between words does not cut it. An
+  element cut by its squelch is silent and does not play, so it ducks
+  nobody. `--ffrwd-squelch: none` takes the squelch away: the element is
+  heard at its volume however quiet, and plays whenever its input is
+  present with sound. That is for programme sound, such as a venue's game
+  audio, whose quiet stretches the default would cut; commentary is
+  squelched by default. Deciding what plays by the level is a first step;
+  a voice detector may take its place later.
 
 A style sets them on the element or on any ancestor, inline or not:
 
@@ -325,18 +327,18 @@ element that shows an input as a `background-image` from inside a
 `display: none` subtree is the exception: the style traversal gives such
 an element no background, so it is not found. Use `<img>`.)
 
-Every change of an element's gain, a row's, a duck's or a gate's, is a
+Every change of an element's gain, a row's, a duck's or a squelch's, is a
 straight ramp across the samples of the frame it lands on, from the last
 frame's gain to the new one: 16.7 ms at 60 fps, 33 ms at 30. A step would
 click, and a ramp of a few milliseconds no longer does; a ramp of one
 frame is complete on the frame the change belongs to, so the next frame
-is at the new level whatever it brings. A gate that opens ramps its input
+is at the new level whatever it brings. A squelch that opens ramps its input
 in across the first frame it is loud on. A fade longer than a frame is a
 run of rows, one a frame.
 
 ### What sound costs
 
-The gates' releases and the ramps carry from one frame to the next, so a
+The squelches' releases and the ramps carry from one frame to the next, so a
 `compose_av` call that binds sound is not pure and runs on one worker,
 however many the sidecar has. A call without sound spreads as `compose`
 does.

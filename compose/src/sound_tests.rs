@@ -164,7 +164,7 @@ fn sound_groups_the_held_inputs_and_leaves_a_call_without_it_as_it_was() {
     assert_eq!(hold.group, None, "no sound, no group");
 
     let s = shape(&["v", "inputs", "audio"]);
-    assert!(!s.pure, "the gates and ramps carry from tick to tick");
+    assert!(!s.pure, "the squelches and ramps carry from tick to tick");
     let Pairing::Hold(pictures) = &s.find_input("inputs").unwrap().pairing else {
         panic!("inputs are held")
     };
@@ -223,7 +223,7 @@ fn every_tick_has_its_samples_and_the_ticks_meet() {
         match k {
             2 => assert!(
                 out[N - 1] == 0.25 && out.windows(2).all(|w| w[1] >= w[0]),
-                "tick 2: the gate opening ramps the input in"
+                "tick 2: the squelch opening ramps the input in"
             ),
             3 => assert!(out.iter().all(|s| *s == 0.25), "tick 3: the input"),
             _ => assert!(
@@ -411,7 +411,7 @@ fn two_ducking_elements_duck_each_other() {
 #[test]
 fn a_track_below_its_squelch_is_silent_and_ducks_nobody_until_it_is_loud() {
     // The cam at -60 dBFS (0.001), then at 0.2 on ticks 3 and 4, then
-    // silent; main at 0.1. Its gate opens on tick 3 and stays open for the
+    // silent; main at 0.1. Its squelch opens on tick 3 and stays open for the
     // release, 0.5 s (30 ticks), after tick 4: the cam quiet but heard and
     // main ducked to tick 34, then the cam silent and main back.
     let mut h = open(&ducking(""), "", 2, 2);
@@ -443,7 +443,7 @@ fn a_track_below_its_squelch_is_silent_and_ducks_nobody_until_it_is_loud() {
 }
 
 #[test]
-fn the_release_keeps_a_gate_open_across_a_short_pause() {
+fn the_release_keeps_a_squelch_open_across_a_short_pause() {
     // The cam loud, silent for 0.2 s (12 ticks), loud again: main stays
     // ducked throughout.
     let mut h = open(&ducking(""), "", 2, 2);

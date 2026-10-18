@@ -13,8 +13,8 @@
 -- quarter second), nine flashes in all, each with its beep on the same
 -- instant, sound minus picture 0 ms within a millisecond. The beeps at 0,
 -- 4 and 8 s fall before each feed's first picture and are not heard.
--- `--ffrwd-squelch: none` keeps the gate open, so no beep's onset is
--- ramped in. `tests/lip_sync.py` checks those numbers. Where the second
+-- `--ffrwd-squelch: none` leaves the input heard in the silences, so no
+-- beep's onset is ramped in. `tests/lip_sync.py` checks those numbers. Where the second
 -- and third feeds start on the clock depends on when the host has held
 -- `lead` of each, which moves by a few frames from run to run, so the
 -- frames are not compared byte for byte; the matroska output's 1 ms time

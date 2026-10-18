@@ -80,7 +80,7 @@ RETURNS video_stream
 -- 0's, in step with `v`: a silent source where `v` has none. `audio` is 48 kHz stereo on
 -- every frame of `v`: each element showing an input heard at its
 -- `--ffrwd-volume`, ducked to its `--ffrwd-volume-duck` while another
--- input plays, gated by its `--ffrwd-squelch`, and summed (see the
+-- input plays, squelched by its `--ffrwd-squelch`, and summed (see the
 -- README). A call with sound runs on one worker.
 CREATE FUNCTION compose_av(v video_stream,
                            inputs video_stream[] DEFAULT NULL,

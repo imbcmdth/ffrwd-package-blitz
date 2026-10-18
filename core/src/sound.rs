@@ -5,13 +5,13 @@
 //! scaled by its gain, summed and clamped. A gain that changes from one
 //! tick to the next is ramped across the second tick's samples.
 //!
-//! Each element also has a squelch: its input's level on a tick (the RMS of
-//! the samples the input hands that tick, before any volume) opens the
-//! element's gate when it is above `--ffrwd-squelch`, and the gate stays
-//! open for `--ffrwd-squelch-release` seconds after the level was last
-//! above it. A closed gate silences the element. An element plays, and
-//! ducks the others, while its gate is open, its volume is above 0 and its
-//! input carries sound.
+//! Each element also has a squelch: the element is heard while its input's
+//! level on a tick (the RMS of the samples the input hands that tick,
+//! before any volume) is above `--ffrwd-squelch`, and for
+//! `--ffrwd-squelch-release` seconds after it was last above it, and is
+//! silent otherwise. An element plays, and ducks the others, while its
+//! squelch lets it be heard, its volume is above 0 and its input carries
+//! sound.
 
 use std::collections::VecDeque;
 
@@ -26,9 +26,9 @@ pub const DUCK: &str = "ffrwd-volume-duck";
 pub const SQUELCH: &str = "ffrwd-squelch";
 pub const SQUELCH_RELEASE: &str = "ffrwd-squelch-release";
 
-/// The level, in dBFS, a gate opens above by default: near silence.
+/// The level, in dBFS, a squelch opens above by default: near silence.
 pub const THRESHOLD: f32 = -50.0;
-/// Seconds a gate stays open by default after its level was last above
+/// Seconds a squelch stays open by default after its level was last above
 /// the threshold.
 pub const RELEASE: f32 = 0.5;
 /// The longest release honoured, and how far back the levels are kept.
@@ -42,7 +42,7 @@ pub struct Voice {
     pub volume: f32,
     /// `--ffrwd-volume-duck`: none unset, which never ducks.
     pub duck: Option<f32>,
-    /// `--ffrwd-squelch`, dBFS; none (`none`) for no gate, always open.
+    /// `--ffrwd-squelch`, dBFS; none (`none`) for no squelch, always heard.
     pub squelch: Option<f32>,
     /// `--ffrwd-squelch-release`, seconds.
     pub release: f32,
@@ -68,7 +68,7 @@ pub fn number(css: &str) -> Option<f32> {
     v.is_finite().then_some(v)
 }
 
-/// A squelch as CSS text: `none` for no gate, else a number of dBFS.
+/// A squelch as CSS text: `none` for no squelch, else a number of dBFS.
 /// Anything else is the default.
 pub fn squelch(css: &str) -> Option<f32> {
     if css.trim().eq_ignore_ascii_case("none") {
@@ -92,7 +92,7 @@ pub fn rms_dbfs(samples: &[f32]) -> f32 {
     (10.0 * power.log10()) as f32
 }
 
-/// Each input's level on the recent ticks, for the gates.
+/// Each input's level on the recent ticks, for the squelches.
 #[derive(Clone, Debug, Default)]
 pub struct Loudness {
     /// Per input, oldest first: a tick's time, seconds, and its level, dBFS.
@@ -135,10 +135,10 @@ impl Loudness {
 /// Each input's gain, `inputs` long: the sum over the elements showing it
 /// of each one's gain. `sounding` says which inputs are present and carry
 /// sound this tick, and `open` whether a level above a threshold was heard
-/// on an input within a release. An element whose gate is closed is at 0;
-/// one with no squelch has a gate always open.
+/// on an input within a release. An element its squelch cuts is at 0; one
+/// with no squelch is always heard.
 /// One with a duck level is at that level while an element of another
-/// input plays: its gate open, at a volume above 0, its input sounding.
+/// input plays: past its squelch, at a volume above 0, its input sounding.
 /// Whether an element plays never depends on its own duck, so two ducking
 /// elements duck each other.
 pub fn gains(
@@ -147,14 +147,14 @@ pub fn gains(
     open: &dyn Fn(u32, f32, f32) -> bool,
     inputs: usize,
 ) -> Vec<f32> {
-    let gate = |v: &Voice| v.squelch.is_none_or(|th| open(v.input, th, v.release));
-    let playing = |v: &Voice| v.volume > 0.0 && sounding(v.input) && gate(v);
+    let heard = |v: &Voice| v.squelch.is_none_or(|th| open(v.input, th, v.release));
+    let playing = |v: &Voice| v.volume > 0.0 && sounding(v.input) && heard(v);
     let mut gains = vec![0.0; inputs];
     for voice in voices {
         let Some(gain) = gains.get_mut(voice.input as usize) else {
             continue;
         };
-        if !gate(voice) {
+        if !heard(voice) {
             continue;
         }
         let ducked = voice.duck.filter(|_| {
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gate_stays_open_for_its_release() {
+    fn a_squelch_stays_open_for_its_release() {
         let mut levels = Loudness::default();
         let tick = |k: i64| k as f64 / 60.0;
         for k in 0..10 {
