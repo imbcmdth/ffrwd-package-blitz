@@ -702,3 +702,94 @@ fn a_change_of_frame_spacing_is_followed() {
         assert!(near(*s, want), "sample {n}: {s}");
     }
 }
+
+#[test]
+fn a_held_feed_s_beep_is_heard_on_the_tick_that_shows_its_flash() {
+    // foundmeat's numbers: the clock counts in 1/61440 at 60 a second, a
+    // tick 1024; the feed's picture counts in 1/90000 from 0.021 s and its
+    // sound in samples from 0; the host fixed the feed at tick 206848
+    // (3.367 s) from its first picture, so its offset is 3.345667 s, and
+    // hands each tick the newest picture at or before the tick less the
+    // offset and the samples of the tick's window less the offset, as the
+    // hold does. The flash is picture 600 (source 10.021 s) and the beep
+    // starts on the sample of the same source time.
+    const CLOCK: Rational = Rational::new(1, 61_440);
+    const PICTURE: Rational = Rational::new(1, 90_000);
+    let mut bound =
+        vec![BoundStream::video("v", 0, W, H, "rgba", CLOCK).rate(Rational::new(60, 1))];
+    bound.push(BoundStream::video("inputs", 10, W, H, "rgba", PICTURE));
+    bound.push(BoundStream::audio("audio", 30, sound::RATE, 2, "f32"));
+    let p = serde_json::json!({"html": doc(r#"<img src="ffrwd:1">"#), "lead": 0.3});
+    let mut h = Harness::<Compose>::new(&p.to_string(), bound).unwrap();
+    let at = 206_848i64;
+    let first_picture = 1_890i64;
+    // The offset in exact rationals: clock seconds less source seconds.
+    let offset =
+        |t: i64| t as f64 / 61_440.0 - (at as f64 / 61_440.0 - first_picture as f64 / 90_000.0);
+    let record = |first_pts| Feed {
+        start: FeedStart {
+            tags: Vec::new(),
+            first_pts,
+            at,
+            known: 188_416,
+        },
+        ends: None,
+    };
+    // The sound's record: the sample the same offset puts at `at`, 0.021 s.
+    let first_sound = 1_008i64;
+    let flash = 600i64;
+    let beep_from = ((first_picture + flash * 1_500) as f64 / 90_000.0 * 48_000.0).round() as i64;
+    let mut heard_at: Option<i64> = None;
+    let mut shown_at: Option<i64> = None;
+    let mut written = 0i64;
+    for k in 0..900i64 {
+        let t = 188_416 + k * 1_024;
+        let mut tick = h.tick(t).frame(0, t, vec![0; (W * H * 4) as usize]);
+        if t >= at {
+            let target = offset(t);
+            let n = ((target - first_picture as f64 / 90_000.0) * 60.0 + 1e-9).floor() as i64;
+            if n >= flash && shown_at.is_none() {
+                shown_at = Some(t);
+            }
+            let s0 = (offset(t) * 48_000.0 + 1e-9).floor() as i64;
+            let s1 = (offset(t + 1_024) * 48_000.0 + 1e-9).floor() as i64;
+            let run: Vec<f32> = (s0..s1)
+                .map(|i| {
+                    if (beep_from..beep_from + 2_400).contains(&i) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let bytes: Vec<u8> = run
+                .iter()
+                .flat_map(|v| [*v, *v])
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            tick = tick
+                .feed(10, record(first_picture))
+                .frame(
+                    10,
+                    first_picture + n.max(0) * 1_500,
+                    vec![255; (W * H * 4) as usize],
+                )
+                .feed(30, record(first_sound))
+                .frame(30, s0, bytes);
+        }
+        let (pts, out) = heard(&h.process(&tick).unwrap());
+        written = written.max(pts + out.len() as i64);
+        if heard_at.is_none()
+            && let Some(i) = out.iter().position(|v| *v > 0.5)
+        {
+            heard_at = Some(pts + i as i64);
+        }
+    }
+    let shown = shown_at.expect("the flash showed") as f64 / 61_440.0;
+    let heard = heard_at.expect("the beep was heard") as f64 / 48_000.0;
+    assert!(written > 0);
+    assert!(
+        (heard - shown).abs() < 1.0 / 60.0,
+        "the beep at {heard:.4} s, the flash on the tick at {shown:.4} s"
+    );
+}
