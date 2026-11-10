@@ -604,6 +604,22 @@ impl Compositor {
         Some((o.x, o.y, s.width, s.height))
     }
 
+    /// The text of the first element matching `selector`, in document order,
+    /// that has any, its runs of white space made one space. None when the
+    /// selector matches nothing with text or does not parse.
+    pub fn text_of(&self, selector: &str) -> Option<String> {
+        let ids = self.doc.query_selector_all(selector).ok()?;
+        ids.into_iter()
+            .filter_map(|id| self.doc.get_node(id))
+            .map(|node| {
+                node.text_content()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .find(|text| !text.is_empty())
+    }
+
     /// The computed opacity of the first element matching `selector`.
     pub fn opacity_of(&self, selector: &str) -> Option<f32> {
         let id = self.doc.query_selector(selector).ok()??;

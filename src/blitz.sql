@@ -45,12 +45,15 @@
 -- rows from the held inputs' feeds coming and going (see the README), out
 -- of the host's record of each feed, so every call may run on several
 -- workers. `cues` takes a transcriber's rows, each stream drawn into the
--- element `captions` names, `{n}` standing for its number from 1: a cue
--- fills in as it grows, `lines` show at once, and each goes `hold` seconds
--- after its final row, or `stale` seconds after its last. Its text is
--- WebVTT cue text, whose tags become elements and nothing else does. A
--- run-time lateral's rows arrive on its own connection, so the call may
--- hand cues from only some of the held inputs.
+-- element `captions` names, `{n}` standing for its number from 1 (without
+-- `{n}`, every stream in one element): a cue fills in as it grows, `lines`
+-- show at once, and each goes `hold` seconds after its final row, or
+-- `stale` seconds after its last. A cue whose speaker is not the one
+-- before it starts `>> NAME:`, the name being the text of the element
+-- `speakers` names for its stream. Its text is WebVTT cue text, whose tags
+-- become elements and nothing else does. A run-time lateral's rows arrive
+-- on its own connection, so the call may hand cues from only some of the
+-- held inputs.
 CREATE FUNCTION compose(v video_stream,
                         inputs video_stream[] DEFAULT NULL,
                         changes STRUCT(at number, "select" text, change text,
@@ -74,6 +77,7 @@ CREATE FUNCTION compose(v video_stream,
                         renderer text DEFAULT 'auto',
                         log text DEFAULT 'off',
                         captions text DEFAULT '',
+                        speakers text DEFAULT '',
                         hold number DEFAULT 3,
                         stale number DEFAULT 6,
                         lines number DEFAULT 2)
@@ -120,6 +124,7 @@ CREATE FUNCTION compose_av(v video_stream,
                            renderer text DEFAULT 'auto',
                            log text DEFAULT 'off',
                            captions text DEFAULT '',
+                           speakers text DEFAULT '',
                            hold number DEFAULT 3,
                            stale number DEFAULT 6,
                            lines number DEFAULT 2)

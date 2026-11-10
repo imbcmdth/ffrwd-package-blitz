@@ -13,4 +13,5 @@ mod motion;
 mod multi;
 mod parallel;
 mod rows;
+mod speakers;
 mod timing;

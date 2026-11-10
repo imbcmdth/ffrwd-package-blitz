@@ -475,8 +475,11 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 ### Captions
 
 `cues` draws captions into the document from a transcriber's rows, such as
-`ffrwd/parakeet`'s, one stream per speaker. `captions` names the element
-each stream fills, `{n}` standing for the stream's number from 1:
+`ffrwd/parakeet`'s, one stream per speaker. Broadcast captions sit in one
+display, centred low in the picture, and say who is speaking whenever the
+speaker changes. `captions` names that element, and `speakers` names the
+element whose text is each stream's speaker, `{n}` standing for the
+stream's number from 1:
 
 ```pgsql
 CREATE FUNCTION cam_feed(launch data_stream, url text)
@@ -490,33 +493,54 @@ SELECT (ffrwd.blitz.compose_av(k.video[1], ARRAY[m.video, c1.video, c2.video],
          audio    => ARRAY[m.audio, c1.audio, c2.audio],
          a        => s.audio[1],
          cues     => ARRAY[c1.cues, c2.cues],
-         captions => '[data-slot="cam{n}.caption"]',
+         captions => '[data-slot="captions"]',
+         speakers => '[data-slot="caster{n}.name"], [data-slot="caster{n}.handle"]',
          html     => :'template')).*
+```
+
+The display then reads, two casters talking in turn:
+
+```text
+>> MANGO: HE GOES FOR THE FLANK
+>> LUDWIG: WHAT A READ
 ```
 
 - Each cam's lateral writes its transcriber's rows on its own connection,
   after its picture and sound, so the rows come with that cam's frames and
   a caption comes up with the words it carries. The call may hand cues
   from only some of the held inputs, here the cams and not the main feed.
+  Captions from a lateral need ffrwd 0.36.1 or newer.
 - A row whose `start_t` is a cue's already on screen is that cue grown,
   and replaces it, so a line fills in as it is spoken; any other starts a
   new cue below it. `lines` cues show at once (2 by default).
 - A cue goes `hold` seconds after its final row (3 by default), or
   `stale` seconds after its last row when none was final (6).
+- A cue starts a new speaker when the display is empty as it arrives, or
+  when the cue before it came from another stream or carries another
+  `voice`. Such a cue begins with `<span class="speaker">>> Mango:</span>`,
+  the convention of live captions. The name is the row's `voice` when it
+  has one, else the text of the first element `speakers` matches for its
+  stream that has any text, so a selector list falls back from a name to
+  a handle. The text is read from the document as it stands at that
+  frame, after the rows due by then, so a name the document changes shows
+  on the next frame and every worker reads the same. With no name known,
+  a display several streams share still marks the change with `>>`.
 - Each cue is `<span class="cue">` in its element, with `data-voice` when
   its row names a `voice`. The text is WebVTT cue text: its tags (`c`,
   `i`, `b`, `u`, `ruby`, `rt`, `v`, `lang`) become elements, `<v Name>`
   a span with `data-voice`, and anything else stays text, so a cue from
   an outside source puts no markup into the document. The template's CSS
-  styles them, `.cue` and `[data-voice="Name"]` among them.
-- A template without `{n}` draws every stream into one element, in the
-  order the cues arrive.
+  styles them, `.cue`, `.speaker` and `[data-voice="Name"]` among them;
+  capitals, as live captions are written, are `text-transform: uppercase`.
+- With `{n}` in `captions`, each stream fills an element of its own, and
+  names its speaker only when `speakers` is given.
 - To switch burned captions on and off while live, have the template's
-  CSS hide the elements unless a class is on `body`, and send a change
+  CSS hide the display unless a class is on `body`, and send a change
   row that sets or clears it:
-  `body:not(.captions-burned) [data-slot$=".caption"] { display: none }`.
+  `body:not(.captions-burned) [data-slot="captions"] { display: none }`.
 - What an element shows at a frame is a function of the cue rows that
-  arrived by then and that frame's time, so every worker draws the same.
+  arrived by then, the document at that frame, and its time, so every
+  worker draws the same.
 
 ## Parameters
 
@@ -536,7 +560,8 @@ SELECT (ffrwd.blitz.compose_av(k.video[1], ARRAY[m.video, c1.video, c2.video],
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
 | `cues` | rows list | none | `compose`: a transcriber's rows, one stream per element. See [Captions](#captions). |
-| `captions` | text | `''` | `compose`: the element each stream of `cues` fills, `{n}` its number from 1. |
+| `captions` | text | `''` | `compose`: the element `cues` fill, one for all, or one per stream with `{n}` its number from 1. |
+| `speakers` | text | `''` | `compose`: the element whose text names each stream's speaker, `{n}` its number from 1. |
 | `hold`, `stale` | number | `3`, `6` | `compose`: seconds a cue stays after its final row, and after its last row when none was final. |
 | `lines` | number | `2` | `compose`: how many cues show at once in one element. |
 | `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |

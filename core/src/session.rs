@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::changes::{Row, Source, Timed, Timeline};
+use crate::changes::{Row, Source, Step, Timed, Timeline};
 use crate::params::{Log, Params};
 use crate::{Compositor, Gpu, Picture, Plan, RasterImageData, bit};
 
@@ -52,6 +52,8 @@ pub struct Session {
     tl: Timeline,
     totals: Totals,
     pub last: FrameStats,
+    /// Rows applied before the frame, to read the document at its time.
+    early: Step,
 }
 
 impl Session {
@@ -75,6 +77,7 @@ impl Session {
             tl,
             totals: Totals::default(),
             last: FrameStats::default(),
+            early: Step::default(),
         }
     }
 
@@ -99,6 +102,7 @@ impl Session {
             tl,
             totals: Totals::default(),
             last: FrameStats::default(),
+            early: Step::default(),
         }
     }
 
@@ -226,6 +230,18 @@ impl Session {
         }
     }
 
+    /// The text of the first element matching `selector` that has any, in
+    /// the document as it stands at `t`. The rows due by `t` are applied
+    /// first, as the frame at `t` applies them, so every instance reads the
+    /// same text whichever ticks it rendered.
+    pub fn text_at(&mut self, t: f64, selector: &str) -> Option<String> {
+        let step = self.tl.replay_due(&mut self.comp, t);
+        self.early.rows += step.rows;
+        self.early.apply_us += step.apply_us;
+        self.early.replay_resolve_us += step.replay_resolve_us;
+        self.comp.text_of(selector)
+    }
+
     /// One frame at `t` seconds: rows due by `t` are applied at their own
     /// times, the document is resolved at `t`, and the frame is either one
     /// input untouched (nothing fetched) or rendered from the inputs it
@@ -278,13 +294,14 @@ impl Session {
     ) -> Output {
         let start = Instant::now();
         let step = self.tl.advance(&mut self.comp, t);
+        let early = std::mem::take(&mut self.early);
         let s = Instant::now();
         let plan: Plan = self.comp.plan(absent);
         let plan_us = us(s);
         let mut st = FrameStats {
-            rows: step.rows,
-            apply_us: step.apply_us,
-            resolve_us: step.replay_resolve_us + step.resolve_us,
+            rows: early.rows + step.rows,
+            apply_us: early.apply_us + step.apply_us,
+            resolve_us: early.replay_resolve_us + step.replay_resolve_us + step.resolve_us,
             plan_us,
             ..Default::default()
         };

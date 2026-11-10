@@ -76,7 +76,7 @@ mod frames {
     }
 }
 
-const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"audio_port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"captions":{"type":"string","default":""},"hold":{"type":"number","minimum":0,"maximum":600,"default":3},"stale":{"type":"number","minimum":0,"maximum":600,"default":6},"lines":{"type":"integer","minimum":1,"maximum":20,"default":2},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
+const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"string","default":""},"rows":{"type":"string","default":""},"width":{"type":"number","minimum":1},"height":{"type":"number","minimum":1},"css_width":{"type":"number","minimum":1},"css_height":{"type":"number","minimum":1},"fit":{"type":"string","enum":["contain","stretch"],"default":"contain"},"bypass":{"type":"boolean","default":true},"fps":{"type":"number","exclusiveMinimum":0,"maximum":240,"default":30},"port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"audio_port":{"type":["array","integer"],"items":{"type":"integer","minimum":1,"maximum":65535},"minimum":1,"maximum":65535},"lead":{"type":"number","minimum":0,"maximum":60,"default":0.3},"linger":{"type":"number","minimum":0,"maximum":60,"default":0},"timeout":{"type":"number","minimum":0,"maximum":60,"default":1},"latency":{"type":"number","minimum":0},"presence":{"type":"string","default":""},"captions":{"type":"string","default":""},"speakers":{"type":"string","default":""},"hold":{"type":"number","minimum":0,"maximum":600,"default":3},"stale":{"type":"number","minimum":0,"maximum":600,"default":6},"lines":{"type":"integer","minimum":1,"maximum":20,"default":2},"renderer":{"type":"string","enum":["auto","gpu","cpu"],"default":"auto"},"log":{"type":"string","enum":["off","summary","frame"],"default":"off"}},"additionalProperties":false}"#;
 
 /// What `cues` reads: a transcriber's rows, of which `text` is drawn
 /// (compose_core::cues).
@@ -138,6 +138,10 @@ pub struct Params {
     /// standing for the stream's number from 1.
     #[serde(default)]
     captions: String,
+    /// The element naming each stream's speaker, as `captions` names its
+    /// element: the text of the first element it matches that has any.
+    #[serde(default)]
+    speakers: String,
     /// Seconds a cue stays after its final row.
     #[serde(default = "cue_hold")]
     hold: f64,
@@ -323,7 +327,7 @@ pub struct Compose {
     /// them, with the params it was made for.
     cue_streams: Vec<u32>,
     cues: Cues,
-    cues_made: (String, CueParams),
+    cues_made: (String, String, CueParams),
     /// One frame of the clock, in its pts, where a frame does not say: from
     /// the rate `v` was bound at.
     step: Option<i64>,
@@ -624,11 +628,15 @@ impl Node for Compose {
         let entries = Entry::parse_list(&params.presence)?;
         let cue_streams: Vec<u32> = init.streams("cues").iter().map(|s| s.id).collect();
         if !cue_streams.is_empty() && params.captions.is_empty() {
-            return Err("`cues` are drawn into the element `captions` names: give it a                         selector, `{n}` standing for the stream's number from 1"
+            return Err("`cues` are drawn into the element `captions` names: give it a selector, `{n}` standing for the stream's number from 1"
                 .into());
         }
-        let cues_made = (params.captions.clone(), params.cue_params());
-        let cues = Cues::new(&cues_made.0, cue_streams.len(), cues_made.1);
+        let cues_made = (
+            params.captions.clone(),
+            params.speakers.clone(),
+            params.cue_params(),
+        );
+        let cues = Cues::new(&cues_made.0, &cues_made.1, cue_streams.len(), cues_made.2);
         let v = init.optional("v");
         let held: Vec<&BoundStream> = init.streams("inputs");
         if held.len() as u32 + 1 > MAX_INPUTS {
@@ -785,9 +793,13 @@ impl Node for Compose {
         let entries = Entry::parse_list(&params.presence)?;
         self.watched = watched(&entries, &self.held)?;
         self.presence.set(entries);
-        let made = (params.captions.clone(), params.cue_params());
+        let made = (
+            params.captions.clone(),
+            params.speakers.clone(),
+            params.cue_params(),
+        );
         if made != self.cues_made {
-            self.cues = Cues::new(&made.0, self.cue_streams.len(), made.1);
+            self.cues = Cues::new(&made.0, &made.1, self.cue_streams.len(), made.2);
             self.cues_made = made;
         }
         let renderer = doc.renderer;
@@ -860,7 +872,9 @@ impl Node for Compose {
             self.session.schedule(rows);
         }
         if !self.cue_streams.is_empty() {
-            self.session.schedule(self.cues.tick(t));
+            let session = &mut self.session;
+            let rows = self.cues.tick(t, &mut |select| session.text_at(t, select));
+            self.session.schedule(rows);
         }
 
         let showing: Vec<_> = self.held.iter().map(|id| tick.frame(*id)).collect();
