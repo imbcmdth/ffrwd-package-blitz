@@ -10,6 +10,7 @@
 //! `resolve`, which is what Stylo's animation and transition engine samples.
 
 pub mod changes;
+pub mod cues;
 pub mod geometry;
 pub mod gpu;
 pub mod net;

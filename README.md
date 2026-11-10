@@ -87,7 +87,7 @@ ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 
 | export | reads | clock | output |
 |---|---|---|---|
-| `compose` | `v`, any number of held `inputs`, rows on `changes` | `v`'s frames | one frame per frame of `v`, `v`'s size or `width` x `height` |
+| `compose` | `v`, any number of held `inputs`, rows on `changes`, a transcriber's rows on `cues` | `v`'s frames | one frame per frame of `v`, `v`'s size or `width` x `height` |
 | `compose_av` | as `compose`, and each held input's sound on `audio` and `v`'s on `a` | `v`'s frames | `video` as `compose`'s, and `audio`, 48 kHz stereo, on every frame of `v` (see [Sound](#sound)) |
 | `page` | nothing | `fps` frames a second | `width` x `height`, a source read in FROM |
 
@@ -100,7 +100,9 @@ Every row the document applies is folded as state, and a worker is handed
 the rows of the ticks it did not render, so `compose` and `page` spread
 over the sidecar's workers and the output is the same at any worker
 count. Presence rows are made from the host's record of each feed, which
-every worker is handed, so a call that gives `presence` spreads too. A
+every worker is handed, so a call that gives `presence` spreads too, and
+captions are drawn from the cue rows every worker folds, so one that
+gives `cues` does as well. A
 `compose_av` call that binds sound runs on one worker (see
 [What sound costs](#what-sound-costs)).
 
@@ -470,6 +472,52 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 - Each message is a change object or an array of them, without `at`,
   which the feed's times fill in.
 
+### Captions
+
+`cues` draws captions into the document from a transcriber's rows, such as
+`ffrwd/parakeet`'s, one stream per speaker. `captions` names the element
+each stream fills, `{n}` standing for the stream's number from 1:
+
+```pgsql
+CREATE FUNCTION cam_feed(launch data_stream, url text)
+RETURNS TABLE(video video_stream, audio audio_stream, cues data_stream) AS $$
+  SELECT f.video[1] AS video, f.audio[1] AS audio,
+         ffrwd.parakeet.transcribe(f.audio[1]) AS cues
+  FROM input(url, format => 'mpegts', shape => ...) f
+$$ LANGUAGE sql;
+
+SELECT (ffrwd.blitz.compose_av(k.video[1], ARRAY[m.video, c1.video, c2.video],
+         audio    => ARRAY[m.audio, c1.audio, c2.audio],
+         a        => s.audio[1],
+         cues     => ARRAY[c1.cues, c2.cues],
+         captions => '[data-slot="cam{n}.caption"]',
+         html     => :'template')).*
+```
+
+- Each cam's lateral writes its transcriber's rows on its own connection,
+  after its picture and sound, so the rows come with that cam's frames and
+  a caption comes up with the words it carries. The call may hand cues
+  from only some of the held inputs, here the cams and not the main feed.
+- A row whose `start_t` is a cue's already on screen is that cue grown,
+  and replaces it, so a line fills in as it is spoken; any other starts a
+  new cue below it. `lines` cues show at once (2 by default).
+- A cue goes `hold` seconds after its final row (3 by default), or
+  `stale` seconds after its last row when none was final (6).
+- Each cue is `<span class="cue">` in its element, with `data-voice` when
+  its row names a `voice`. The text is WebVTT cue text: its tags (`c`,
+  `i`, `b`, `u`, `ruby`, `rt`, `v`, `lang`) become elements, `<v Name>`
+  a span with `data-voice`, and anything else stays text, so a cue from
+  an outside source puts no markup into the document. The template's CSS
+  styles them, `.cue` and `[data-voice="Name"]` among them.
+- A template without `{n}` draws every stream into one element, in the
+  order the cues arrive.
+- To switch burned captions on and off while live, have the template's
+  CSS hide the elements unless a class is on `body`, and send a change
+  row that sets or clears it:
+  `body:not(.captions-burned) [data-slot$=".caption"] { display: none }`.
+- What an element shows at a frame is a function of the cue rows that
+  arrived by then and that frame's time, so every worker draws the same.
+
 ## Parameters
 
 | parameter | type | default | |
@@ -487,6 +535,10 @@ presence => '[{"input": 1, "on": {"select": "#stage", "change": "~takeover"},
 | `audio_port` | number, or a list of them | none | `compose_av`: the loopback ports of `audio`; written by the compiler for laterals. |
 | `latency` | number | none | `compose`: the longest wait for a producer on `changes`, in seconds. |
 | `presence` | text | `''` | `compose`: rows at the edges of held inputs' feeds. |
+| `cues` | rows list | none | `compose`: a transcriber's rows, one stream per element. See [Captions](#captions). |
+| `captions` | text | `''` | `compose`: the element each stream of `cues` fills, `{n}` its number from 1. |
+| `hold`, `stale` | number | `3`, `6` | `compose`: seconds a cue stays after its final row, and after its last row when none was final. |
+| `lines` | number | `2` | `compose`: how many cues show at once in one element. |
 | `renderer` | text | `'auto'` | Who rasterises the document: `'auto'` (the GPU when the host has an adapter, the CPU otherwise), `'gpu'` (refused with no adapter) or `'cpu'` (no adapter asked for). See [The GPU path](#the-gpu-path). Every renderer takes rgba or yuv420p on `v` and `inputs` (see [Pixel formats](#pixel-formats)); 0.3.0's CPU path took rgba alone. |
 | `fps` | number | `30` | `page`: frames a second. |
 | `log` | text | `'off'` | `'off'`, `'summary'` (a line when an instance opens and one when it ends) or `'frame'` (a line per frame with its timings), on stderr (`FFRWD_DUMP_STDERR`). Each worker opens an instance. |

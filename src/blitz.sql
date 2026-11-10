@@ -44,11 +44,19 @@
 -- producer at most `latency` seconds when that is given. `presence` makes
 -- rows from the held inputs' feeds coming and going (see the README), out
 -- of the host's record of each feed, so every call may run on several
--- workers.
+-- workers. `cues` takes a transcriber's rows, each stream drawn into the
+-- element `captions` names, `{n}` standing for its number from 1: a cue
+-- fills in as it grows, `lines` show at once, and each goes `hold` seconds
+-- after its final row, or `stale` seconds after its last. Its text is
+-- WebVTT cue text, whose tags become elements and nothing else does. A
+-- run-time lateral's rows arrive on its own connection, so the call may
+-- hand cues from only some of the held inputs.
 CREATE FUNCTION compose(v video_stream,
                         inputs video_stream[] DEFAULT NULL,
                         changes STRUCT(at number, "select" text, change text,
                                        text text, html text)[][] DEFAULT NULL,
+                        cues STRUCT(text text, start_t number, end_t number,
+                                    final boolean)[][] DEFAULT NULL,
                         html text DEFAULT '',
                         rows text DEFAULT '',
                         width number DEFAULT NULL,
@@ -64,7 +72,11 @@ CREATE FUNCTION compose(v video_stream,
                         latency number DEFAULT NULL,
                         presence text DEFAULT '',
                         renderer text DEFAULT 'auto',
-                        log text DEFAULT 'off')
+                        log text DEFAULT 'off',
+                        captions text DEFAULT '',
+                        hold number DEFAULT 3,
+                        stale number DEFAULT 6,
+                        lines number DEFAULT 2)
 RETURNS video_stream
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
@@ -88,6 +100,8 @@ CREATE FUNCTION compose_av(v video_stream,
                            a audio_stream DEFAULT NULL,
                            changes STRUCT(at number, "select" text, change text,
                                           text text, html text)[][] DEFAULT NULL,
+                           cues STRUCT(text text, start_t number, end_t number,
+                                       final boolean)[][] DEFAULT NULL,
                            html text DEFAULT '',
                            rows text DEFAULT '',
                            width number DEFAULT NULL,
@@ -104,7 +118,11 @@ CREATE FUNCTION compose_av(v video_stream,
                            latency number DEFAULT NULL,
                            presence text DEFAULT '',
                            renderer text DEFAULT 'auto',
-                           log text DEFAULT 'off')
+                           log text DEFAULT 'off',
+                           captions text DEFAULT '',
+                           hold number DEFAULT 3,
+                           stale number DEFAULT 6,
+                           lines number DEFAULT 2)
 RETURNS STRUCT(video video_stream, audio audio_stream)
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
