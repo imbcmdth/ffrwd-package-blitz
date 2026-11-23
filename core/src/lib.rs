@@ -620,6 +620,11 @@ impl Compositor {
             .find(|text| !text.is_empty())
     }
 
+    /// Whether any element matches `selector`. False when it does not parse.
+    pub fn matches(&self, selector: &str) -> bool {
+        matches!(self.doc.query_selector(selector), Ok(Some(_)))
+    }
+
     /// The computed opacity of the first element matching `selector`.
     pub fn opacity_of(&self, selector: &str) -> Option<f32> {
         let id = self.doc.query_selector(selector).ok()??;

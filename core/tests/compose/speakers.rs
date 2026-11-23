@@ -72,3 +72,67 @@ fn one_display_names_each_caster_from_the_document() {
         Some(">> @mango: he goes for the flank>> Big Ludwig: what a read"),
     );
 }
+
+#[test]
+fn the_closed_captions_follow_a_class_on_body_and_name_from_the_document() {
+    let mut s = session(&doc("", BODY), 64, 64, 1);
+    let mut cues = Cues::new("#captions", SPEAKERS, 2, CueParams::default());
+    s.fold(
+        0.0,
+        &lines(&[
+            r#"{"at": 1.0, "select": "body", "change": "+captions-closed"}"#,
+            r#"{"at": 2.0, "select": "[data-slot=\"caster1.name\"]", "text": "Mango"}"#,
+            r#"{"at": 3.0, "select": "body", "change": "-captions-closed"}"#,
+        ]),
+    );
+    let cue =
+        |text: &str| serde_json::json!({"text": text, "start_t": 0.0, "final": false}).to_string();
+    cues.fold(0, 0.5, &cue("he goes")).unwrap();
+    let mut sent = Vec::new();
+    for t in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5] {
+        if t == 1.5 {
+            cues.fold(0, t, &cue("he goes for the")).unwrap();
+        }
+        let on = s.matches_at(t, "body.captions-closed");
+        for row in cues.closed(t, on, &mut |select| s.text_at(t, select)) {
+            sent.push((t, row.text, row.start_t, row.end_t, row.done, row.voice));
+        }
+        render(&mut s, 64, 64, t, 18);
+    }
+    let mango = |name: &str| Some(name.to_string());
+    assert_eq!(
+        sent,
+        [
+            (1.0, "he goes".into(), 1.0, 1.0, false, mango("@mango")),
+            (
+                1.5,
+                "he goes for the".into(),
+                1.0,
+                1.5,
+                false,
+                mango("@mango")
+            ),
+            (
+                2.0,
+                "he goes for the".into(),
+                1.0,
+                2.0,
+                false,
+                mango("Mango")
+            ),
+            (
+                3.0,
+                "he goes for the".into(),
+                1.0,
+                3.0,
+                true,
+                mango("Mango")
+            ),
+        ],
+        "on from the row that adds the class, named as the document names the caster at each tick, and ended by the row that takes it away"
+    );
+    assert!(
+        !s.matches_at(3.5, "[[["),
+        "a selector that does not parse matches nothing"
+    );
+}

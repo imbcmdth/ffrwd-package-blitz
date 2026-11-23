@@ -2,7 +2,8 @@
 //! `compose`'s `changes` from another node. `emit` is a JSON array of
 //! `[seconds, row]` pairs, a row being one change object or an array of
 //! them, each written as its own message on the first tick at or after its
-//! time. Not shipped.
+//! time. `schema` is the rows' JSON schema when they are not change rows,
+//! such as a transcriber's cue rows for `cues`. Not shipped.
 
 use ffrwd_node::{Bound, Init, Input, Node, Out, Output, Rational, Result, Shape, Tick};
 use serde::Deserialize;
@@ -14,6 +15,8 @@ const ROWS_SCHEMA: &str = r#"{"type":"object","properties":{"at":{"type":"number
 #[derive(Deserialize)]
 struct Params {
     emit: String,
+    #[serde(default)]
+    schema: String,
 }
 
 struct EmitChanges {
@@ -52,13 +55,17 @@ fn parse(emit: &str) -> Result<Vec<(f64, String)>, String> {
 impl Node for EmitChanges {
     const NAME: &'static str = "emit_changes";
     const VERSION: &'static str = "0.2.0";
-    const PARAMS_SCHEMA: &'static str = r#"{"type":"object","properties":{"emit":{"type":"string","default":"[]"}},"additionalProperties":false}"#;
+    const PARAMS_SCHEMA: &'static str = r#"{"type":"object","properties":{"emit":{"type":"string","default":"[]"},"schema":{"type":"string","default":""}},"additionalProperties":false}"#;
     type Params = Params;
 
-    fn shape(_: &Params, _: &Bound) -> Result<Shape> {
+    fn shape(params: &Params, _: &Bound) -> Result<Shape> {
+        let schema = match params.schema.as_str() {
+            "" => ROWS_SCHEMA,
+            given => given,
+        };
         Ok(Shape::new()
             .input(Input::video("v").clock())
-            .output(Output::rows("changes").schema_json(ROWS_SCHEMA)))
+            .output(Output::rows("changes").schema_json(schema)))
     }
 
     fn init(params: Params, init: &Init) -> Result<EmitChanges> {

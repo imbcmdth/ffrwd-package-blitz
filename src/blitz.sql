@@ -98,6 +98,18 @@ RETURNS video_stream
 -- `--ffrwd-volume`, ducked to its `--ffrwd-volume-duck` while another
 -- input plays, squelched by its `--ffrwd-squelch`, and summed (see the
 -- README). A call with sound runs on one worker.
+--
+-- A call with sound that binds `cues` makes a third output, `text`: the
+-- captions it draws, as cue rows (`text`, `start_t`, `end_t`, `final`,
+-- `voice`) on the output's timeline, all streams in one output. A cue goes
+-- out when it comes up, again each time its text or its speaker's name
+-- changes, `final` false and `end_t` that frame's time, and once more when
+-- its final row arrives, `final` true and `end_t` the time it leaves the
+-- display. `voice` is the name the display gives the speaker. Rows go out
+-- only while the document's body has the class `captions-closed`, which a
+-- change row sets and clears while live: switched on in the middle of a
+-- cue, the cue starts there, and switched off, it ends there. ffrwd/moq's
+-- `publish` takes the column as its `text` input, a WebVTT rendition.
 CREATE FUNCTION compose_av(v video_stream,
                            inputs video_stream[] DEFAULT NULL,
                            audio audio_stream[] DEFAULT NULL,
@@ -128,7 +140,9 @@ CREATE FUNCTION compose_av(v video_stream,
                            hold number DEFAULT 3,
                            stale number DEFAULT 6,
                            lines number DEFAULT 2)
-RETURNS STRUCT(video video_stream, audio audio_stream)
+RETURNS STRUCT(video video_stream, audio audio_stream,
+               text STRUCT(text text, start_t number, end_t number,
+                           final boolean, voice text)[])
   AS 'target/wasm32-wasip2/release/compose.wasm', 'compose' LANGUAGE wasm;
 
 -- `page` renders the document `fps` times a second on a `width` x `height`

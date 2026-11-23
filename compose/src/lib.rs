@@ -28,6 +28,10 @@
 //! levels, summed (see `compose_core::sound`). Each tick's run starts where
 //! the last ended, so the runs meet. The squelches and the ramps carry state
 //! from tick to tick, so a call with sound runs on one instance.
+//!
+//! A call with sound that binds `cues` also writes `text`: the cues drawn,
+//! as cue rows on the output's timeline, while the document's body has the
+//! class `captions-closed` (see `compose_core::cues::Cues::closed`).
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -82,6 +86,14 @@ const PARAMS_SCHEMA: &str = r#"{"type":"object","properties":{"html":{"type":"st
 /// (compose_core::cues).
 const CUES_SCHEMA: &str =
     r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;
+
+/// The output of closed captions, and what it writes: cue rows, `voice`
+/// when the speaker is known.
+const TEXT: &str = "text";
+const TEXT_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"},"start_t":{"type":"number"},"end_t":{"type":"number"},"final":{"type":"boolean"},"voice":{"type":"string"}},"required":["text","start_t","end_t","final"]}"#;
+
+/// What switches the closed captions on: a class on the document's body.
+const CLOSED: &str = "body.captions-closed";
 
 /// What `changes` reads: rows with a selector. The rest of a row is read
 /// when it is applied, and a row that does not read is logged.
@@ -328,6 +340,8 @@ pub struct Compose {
     cue_streams: Vec<u32>,
     cues: Cues,
     cues_made: (String, String, CueParams),
+    /// Whether the shape writes `text`.
+    text: bool,
     /// One frame of the clock, in its pts, where a frame does not say: from
     /// the rate `v` was bound at.
     step: Option<i64>,
@@ -611,7 +625,7 @@ impl Node for Compose {
             shape = shape.input(audio);
         }
         // Not pure: the squelches and the ramps carry from tick to tick.
-        Ok(shape.output(
+        shape = shape.output(
             Output::audio("audio")
                 .audio_format(AudioFormat {
                     sample_rate: sound::RATE,
@@ -620,7 +634,13 @@ impl Node for Compose {
                     channel_layout: Some("stereo".to_owned()),
                 })
                 .time_base(Rational::new(1, sound::RATE as i32)),
-        ))
+        );
+        // A row goes out for each change of a cue the instance sees, so the
+        // rows need the one instance a call with sound runs on.
+        if bound.has("cues") {
+            shape = shape.output(Output::rows(TEXT).schema_json(TEXT_SCHEMA));
+        }
+        Ok(shape)
     }
 
     fn init(params: Params, init: &Init) -> Result<Compose> {
@@ -777,6 +797,7 @@ impl Node for Compose {
             cue_streams,
             cues,
             cues_made,
+            text: init.shape().outputs.iter().any(|o| o.name == TEXT),
             step,
             learned: None,
             last_frame: None,
@@ -875,6 +896,18 @@ impl Node for Compose {
             let session = &mut self.session;
             let rows = self.cues.tick(t, &mut |select| session.text_at(t, select));
             self.session.schedule(rows);
+            if self.text {
+                let on = self.session.matches_at(t, CLOSED);
+                let session = &mut self.session;
+                let mut read = |select: &str| session.text_at(t, select);
+                let mut closed = self.cues.closed(t, on, &mut read);
+                if tick.last() {
+                    closed.extend(self.cues.closed(t, false, &mut read));
+                }
+                for row in closed {
+                    out.message(TEXT, pts, row.json().into_bytes())?;
+                }
+            }
         }
 
         let showing: Vec<_> = self.held.iter().map(|id| tick.frame(*id)).collect();
@@ -1248,3 +1281,6 @@ mod tests;
 
 #[cfg(test)]
 mod sound_tests;
+
+#[cfg(test)]
+mod text_tests;

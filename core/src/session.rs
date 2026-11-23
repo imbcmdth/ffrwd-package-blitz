@@ -235,11 +235,23 @@ impl Session {
     /// first, as the frame at `t` applies them, so every instance reads the
     /// same text whichever ticks it rendered.
     pub fn text_at(&mut self, t: f64, selector: &str) -> Option<String> {
+        self.apply_due(t);
+        self.comp.text_of(selector)
+    }
+
+    /// Whether any element matches `selector` in the document as it stands
+    /// at `t`, read as `text_at` reads.
+    pub fn matches_at(&mut self, t: f64, selector: &str) -> bool {
+        self.apply_due(t);
+        self.comp.matches(selector)
+    }
+
+    /// Applies the rows due by `t`, counted in the frame at `t`.
+    fn apply_due(&mut self, t: f64) {
         let step = self.tl.replay_due(&mut self.comp, t);
         self.early.rows += step.rows;
         self.early.apply_us += step.apply_us;
         self.early.replay_resolve_us += step.replay_resolve_us;
-        self.comp.text_of(selector)
     }
 
     /// One frame at `t` seconds: rows due by `t` are applied at their own

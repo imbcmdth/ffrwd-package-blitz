@@ -88,13 +88,13 @@ ffrwd run ffrwd/blitz:lbar -v dest=lbar.mkv
 | export | reads | clock | output |
 |---|---|---|---|
 | `compose` | `v`, any number of held `inputs`, rows on `changes`, a transcriber's rows on `cues` | `v`'s frames | one frame per frame of `v`, `v`'s size or `width` x `height` |
-| `compose_av` | as `compose`, and each held input's sound on `audio` and `v`'s on `a` | `v`'s frames | `video` as `compose`'s, and `audio`, 48 kHz stereo, on every frame of `v` (see [Sound](#sound)) |
+| `compose_av` | as `compose`, and each held input's sound on `audio` and `v`'s on `a` | `v`'s frames | `video` as `compose`'s, `audio`, 48 kHz stereo, on every frame of `v` (see [Sound](#sound)), and `text`, the captions drawn as cue rows (see [Closed captions](#closed-captions)) |
 | `page` | nothing | `fps` frames a second | `width` x `height`, a source read in FROM |
 
 All three are one module. A node's ports follow its params and the inputs
 a call binds, so the module is clocked by `v` when the call binds it and
 by its own rate when it does not; `page` is a declaration with no `v`, and
-`compose_av` one with the sound ports and two outputs.
+`compose_av` one with the sound ports and its further outputs.
 
 Every row the document applies is folded as state, and a worker is handed
 the rows of the ticks it did not render, so `compose` and `page` spread
@@ -207,7 +207,8 @@ parameter `compose` does and three more:
   picture's connection and port.
 
 It makes two outputs, read off the call by name, `.video` and `.audio`, or
-both at once with `.*` in a WITH body:
+both at once with `.*` in a WITH body, and a third, `.text`, when it draws
+captions (see [Closed captions](#closed-captions)):
 
 ```pgsql
 COPY (
@@ -541,6 +542,63 @@ The display then reads, two casters talking in turn:
 - What an element shows at a frame is a function of the cue rows that
   arrived by then, the document at that frame, and its time, so every
   worker draws the same.
+
+### Closed captions
+
+`compose_av` also writes the captions it draws on a third output, `text`,
+as cue rows a program publishes as its text track. The output is there
+when the call binds `cues` and sound: a row goes out for each change the
+call sees, so the rows need the one worker a call with sound runs on. Read
+it off the call as `.text`, or with `.*` in a WITH body:
+
+```pgsql
+COPY (
+  WITH c AS (
+    SELECT (ffrwd.blitz.compose_av(k.video[1], ARRAY[m.video, c1.video, c2.video],
+              audio    => ARRAY[m.audio, c1.audio, c2.audio],
+              a        => s.audio[1],
+              cues     => ARRAY[c1.cues, c2.cues],
+              captions => '[data-slot="captions"]',
+              speakers => '[data-slot="caster{n}.name"], [data-slot="caster{n}.handle"]',
+              html     => :'template')).*
+    FROM ...
+  )
+  SELECT c.video, c.audio, c.text AS captions FROM c
+) TO ffrwd.moq.publish(:'relay', :'broadcast')
+```
+
+`publish` binds the `captions` column to its `text` input, whose rows are
+cue rows, and publishes them as a WebVTT text rendition named `captions`.
+A sink binds a column to the rows input its rows fit from ffrwd 0.38.0 on.
+
+- Each row is `text`, `start_t`, `end_t`, `final` and `voice`. The times
+  are seconds on the output's timeline, and the row is written on the
+  frame that saw the change. `text` is the cue's text as the transcriber
+  wrote it, WebVTT cue text. `voice` is the speaker's name as the display
+  gives it in `>> NAME:`: the row's own `voice`, else the text `speakers`
+  names, read from the document at that frame. It is left out when no name
+  is known. Every stream's cues share the one output, each under its own
+  `voice`.
+- A cue goes out when it comes up, with `final` false and `end_t` the
+  frame's time, and again each time its text or its speaker's name
+  changes. When its final row arrives it goes out once more, with `final`
+  true and `end_t` the time it leaves the display, `hold` seconds later.
+  A cue whose rows stop without a final one gets a final row where it
+  leaves the display, `stale` seconds after its last row, and a cue still
+  growing on the last frame gets one there.
+- `start_t` is when the cue came up on the display, which is after its
+  first words were spoken: the display's time, not the transcriber's.
+- `lines` limits the display, not the rows: every cue goes out.
+- The closed captions are on while the document's `body` has the class
+  `captions-closed`, switched while live by a change row as the burned
+  ones are: `{"select": "body", "change": "+captions-closed"}`. While the
+  class is off, nothing goes out. Switched on in the middle of a cue, the
+  cue starts on that frame; switched off in the middle of one, it ends
+  there with a final row. A cue whose final row went out before the
+  switch keeps the end it was given.
+- ffrwd/moq's `publish` writes the rows with `final` true into its text
+  track, each from its `start_t`; the rows with `final` false are for a
+  reader that shows a cue as it grows.
 
 ## Parameters
 
@@ -982,6 +1040,13 @@ output: every flash's beep on the same instant, within a millisecond.
 `tests/stream_rows.sql` runs change rows from another node through the
 sidecar, `tests/stream_rows2.sql` does it with a second picture held, and
 `tests/presence.sql` drives a document from a held input's feed.
+`tests/closed_captions.sql` composes two casters' cue rows from another
+node and writes the closed captions to a file, and
+`tests/closed_captions.py` checks each row's text, times and voice.
+`compose/src/text_tests.rs` and `core/src/cues.rs` cover those rows: a
+cue growing and then final, two voices in one output, the class switched
+on and off in the middle of a cue, a name changed while live, a cue that
+stops growing, and the last frame.
 
 `compose/src/tests.rs` also feeds yuv420p pictures to the CPU path in
 each matrix and range a stream may name, handed back whole, drawn by the

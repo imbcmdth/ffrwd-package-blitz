@@ -31,6 +31,12 @@
 //! The element's content at a time is a function of the rows folded by then
 //! and that time alone, so an instance that renders some ticks and folds the
 //! rest draws what one that rendered every tick would.
+//!
+//! The same cues go out as closed captions while they are on: a row each
+//! time a cue shows something new, as a transcriber writes them, its times
+//! on the programme's timeline and its `voice` the name the display gives
+//! its speaker ([`Cues::closed`]). Those rows depend on the ticks an
+//! instance sees, so one instance makes them all.
 
 use serde_json::Value;
 
@@ -85,8 +91,76 @@ impl CueRow {
     }
 }
 
+/// One row of the closed captions: a cue as the display holds it, its
+/// times in seconds on the programme's timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Closed {
+    /// WebVTT cue text, as the transcriber wrote it.
+    pub text: String,
+    pub start_t: f64,
+    /// How far the cue has got: the tick's time while it grows, and on its
+    /// final row the time it leaves the display.
+    pub end_t: f64,
+    /// Whether this is the cue's last row.
+    pub done: bool,
+    /// The speaker's name, as the display gives it; none when not known.
+    pub voice: Option<String>,
+}
+
+impl Closed {
+    /// The row as JSON: `text`, `start_t` and `end_t` to the microsecond,
+    /// `final`, and `voice` when the speaker is known.
+    pub fn json(&self) -> String {
+        let us = |seconds: f64| (seconds * 1e6).round() / 1e6;
+        let mut row = serde_json::json!({
+            "text": self.text,
+            "start_t": us(self.start_t),
+            "end_t": us(self.end_t),
+            "final": self.done,
+        });
+        if let Some(voice) = &self.voice {
+            row["voice"] = Value::from(voice.as_str());
+        }
+        row.to_string()
+    }
+}
+
+/// What of a cue has gone out on the closed captions.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Sent {
+    /// Nothing since they last came on.
+    #[default]
+    Nothing,
+    /// Rows that were not final, the last of them carrying these.
+    Growing {
+        start: f64,
+        text: String,
+        voice: Option<String>,
+    },
+    /// Its final row.
+    Done,
+}
+
+impl Sent {
+    /// The final row that ends a cue still growing at `end`.
+    fn ended(self, end: f64) -> Option<Closed> {
+        match self {
+            Sent::Growing { start, text, voice } => Some(Closed {
+                text,
+                start_t: start,
+                end_t: end,
+                done: true,
+                voice,
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Cue {
+    /// Its place in the order cues arrived in.
+    id: u64,
     /// The stream it came on, from 0.
     stream: usize,
     /// The producer's name for the cue: its `start_t`.
@@ -101,16 +175,22 @@ struct Cue {
     done: Option<f64>,
     /// Whether it starts a new speaker, and so says who is speaking.
     marked: bool,
+    /// What of it has gone out on the closed captions.
+    sent: Sent,
 }
 
 impl Cue {
-    /// Whether the cue shows at `t`.
-    fn shows(&self, t: f64, p: &CueParams) -> bool {
-        let gone = match self.done {
+    /// When the cue leaves its element unless another row comes.
+    fn gone(&self, p: &CueParams) -> f64 {
+        match self.done {
             Some(done) => done + p.hold,
             None => self.last + p.stale,
-        };
-        self.first <= t && t < gone
+        }
+    }
+
+    /// Whether the cue shows at `t`.
+    fn shows(&self, t: f64, p: &CueParams) -> bool {
+        self.first <= t && t < self.gone(p)
     }
 
     /// Whether `other` is the same speaker: the same voice, or the same
@@ -142,6 +222,13 @@ pub struct Cues {
     /// The element naming each stream's speaker, a selector.
     speakers: Vec<Option<String>>,
     slots: Vec<Slot>,
+    /// The id the next cue takes.
+    next: u64,
+    /// Since when the closed captions have been on; none while off.
+    closed_since: Option<f64>,
+    /// Cues that left their element with rows out on the closed captions
+    /// and none of them final.
+    leaving: Vec<Cue>,
 }
 
 impl Cues {
@@ -177,6 +264,9 @@ impl Cues {
             of_stream,
             speakers: named,
             slots,
+            next: 0,
+            closed_since: None,
+            leaving: Vec::new(),
         }
     }
 
@@ -190,7 +280,14 @@ impl Cues {
         };
         let p = self.params;
         let slot = &mut self.slots[at];
-        slot.cues.retain(|cue| cue.shows(t, &p) || cue.first > t);
+        let (kept, gone): (Vec<Cue>, Vec<Cue>) = std::mem::take(&mut slot.cues)
+            .into_iter()
+            .partition(|cue| cue.shows(t, &p) || cue.first > t);
+        slot.cues = kept;
+        self.leaving.extend(
+            gone.into_iter()
+                .filter(|cue| matches!(cue.sent, Sent::Growing { .. })),
+        );
         let grown = slot.cues.iter_mut().rev().find(|cue| {
             cue.stream == stream
                 && cue.done.is_none()
@@ -210,6 +307,7 @@ impl Cues {
             }
             None => {
                 let mut cue = Cue {
+                    id: self.next,
                     stream,
                     name: row.start_t,
                     text: row.text,
@@ -218,7 +316,9 @@ impl Cues {
                     last: t,
                     done: row.done.then_some(t),
                     marked: true,
+                    sent: Sent::Nothing,
                 };
+                self.next += 1;
                 let before = slot.cues.iter().rev().find(|cue| cue.shows(t, &p));
                 cue.marked = before.is_none_or(|before| !before.same_speaker(&cue));
                 slot.cues.push(cue);
@@ -247,6 +347,102 @@ impl Cues {
                 rows.push(Row::html(t, &slot.select, &html));
                 slot.shown = Some(html);
             }
+        }
+        rows
+    }
+
+    /// The closed captions' rows at `t`, `on` being whether they are on
+    /// then: one for each cue that shows something new since its last row,
+    /// in the order the cues arrived.
+    ///
+    /// While they are on, a cue's first row starts it at its arrival, or at
+    /// the time they came on when it arrived before. It goes out again each
+    /// time its text or its speaker's name changes, `final` false and
+    /// `end_t` the tick's time, and once more when its final row arrives,
+    /// `final` true and `end_t` the time it leaves the display, `hold`
+    /// later. A cue whose rows stop without a final one ends, with a final
+    /// row, where it leaves the display. When they go off, every cue still
+    /// growing ends there, and nothing more goes out until they are on
+    /// again, when a cue still on the display starts afresh. A cue whose
+    /// final row went out keeps the end it was given. The name is the
+    /// row's `voice`, else what `read` answers for its stream's speaker, as
+    /// `tick` names it; `lines` limits the display alone.
+    pub fn closed(
+        &mut self,
+        t: f64,
+        on: bool,
+        read: &mut dyn FnMut(&str) -> Option<String>,
+    ) -> Vec<Closed> {
+        let p = self.params;
+        let mut rows: Vec<Closed> = std::mem::take(&mut self.leaving)
+            .into_iter()
+            .filter_map(|cue| {
+                let end = cue.gone(&p);
+                cue.sent.ended(end)
+            })
+            .collect();
+        self.closed_since = match (on, self.closed_since) {
+            (false, _) => None,
+            (true, since) => Some(since.unwrap_or(t)),
+        };
+        let since = self.closed_since;
+        let speakers = &self.speakers;
+        let mut names: Vec<Option<Option<String>>> = vec![None; speakers.len()];
+        let mut cues: Vec<&mut Cue> = self
+            .slots
+            .iter_mut()
+            .flat_map(|slot| slot.cues.iter_mut())
+            .collect();
+        cues.sort_by_key(|cue| cue.id);
+        for cue in cues {
+            let showing = cue.shows(t, &p);
+            let Some(since) = since.filter(|_| showing) else {
+                let sent = std::mem::take(&mut cue.sent);
+                cue.sent = match sent {
+                    Sent::Done => Sent::Done,
+                    _ if t < cue.gone(&p) => Sent::Nothing,
+                    _ => Sent::Done,
+                };
+                rows.extend(sent.ended(t.min(cue.gone(&p))));
+                continue;
+            };
+            if cue.sent == Sent::Done {
+                continue;
+            }
+            let voice = cue.voice.clone().or_else(|| {
+                names[cue.stream]
+                    .get_or_insert_with(|| speakers[cue.stream].as_deref().and_then(&mut *read))
+                    .clone()
+            });
+            let done = cue.done.is_some();
+            let start = match &cue.sent {
+                Sent::Growing {
+                    start,
+                    text,
+                    voice: said,
+                } => {
+                    if !done && *text == cue.text && *said == voice {
+                        continue;
+                    }
+                    *start
+                }
+                _ => cue.first.max(since),
+            };
+            rows.push(Closed {
+                text: cue.text.clone(),
+                start_t: start,
+                end_t: if done { cue.gone(&p) } else { t },
+                done,
+                voice: voice.clone(),
+            });
+            cue.sent = match done {
+                true => Sent::Done,
+                false => Sent::Growing {
+                    start,
+                    text: cue.text.clone(),
+                    voice,
+                },
+            };
         }
         rows
     }
@@ -680,5 +876,197 @@ mod tests {
         let mut cues = Cues::new("#cap", "", 1, CueParams::default());
         assert!(cues.fold(0, 1.0, r##"{"select": "#x"}"##).is_err());
         assert_eq!(html_of(&cues.tick(1.0, &mut none))[0].1, "");
+    }
+
+    fn closed(text: &str, start: f64, end: f64, done: bool, voice: Option<&str>) -> Closed {
+        Closed {
+            text: text.to_string(),
+            start_t: start,
+            end_t: end,
+            done,
+            voice: voice.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_closed_cue_goes_out_as_it_grows_and_once_more_final() {
+        let mut cues = Cues::new("#cap", "#caster{n}", 1, CueParams::default());
+        assert!(cues.closed(0.0, true, &mut casters).is_empty());
+        cues.fold(0, 1.0, &row("he goes", 0.32, false)).unwrap();
+        assert_eq!(
+            cues.closed(1.0, true, &mut casters),
+            [closed("he goes", 1.0, 1.0, false, Some("Mango"))]
+        );
+        assert!(
+            cues.closed(1.2, true, &mut casters).is_empty(),
+            "nothing new, nothing sent"
+        );
+        cues.fold(0, 1.5, &row("he goes for the", 0.32, false))
+            .unwrap();
+        assert_eq!(
+            cues.closed(1.5, true, &mut casters),
+            [closed("he goes for the", 1.0, 1.5, false, Some("Mango"))]
+        );
+        cues.fold(0, 2.0, &row("he goes for the flank", 0.32, true))
+            .unwrap();
+        assert_eq!(
+            cues.closed(2.0, true, &mut casters),
+            [closed(
+                "he goes for the flank",
+                1.0,
+                5.0,
+                true,
+                Some("Mango")
+            )],
+            "the final row ends the cue where it leaves the display, `hold` later"
+        );
+        assert!(cues.closed(3.0, true, &mut casters).is_empty());
+        assert!(cues.closed(6.0, true, &mut casters).is_empty());
+    }
+
+    #[test]
+    fn two_speakers_share_the_closed_captions_each_with_their_voice() {
+        let p = CueParams {
+            lines: 1,
+            ..CueParams::default()
+        };
+        let mut cues = Cues::new("#captions", "#caster{n}", 2, p);
+        cues.closed(0.0, true, &mut casters);
+        cues.fold(0, 1.0, &row("he goes for the", 0.0, false))
+            .unwrap();
+        cues.fold(1, 1.2, &row("what a read", 0.0, true)).unwrap();
+        assert_eq!(
+            cues.closed(1.2, true, &mut casters),
+            [
+                closed("he goes for the", 1.0, 1.2, false, Some("Mango")),
+                closed("what a read", 1.2, 4.2, true, Some("@ludwig")),
+            ],
+            "every cue goes out, however few `lines` shows"
+        );
+        let json =
+            r#"{"text": "and that is game", "start_t": 3, "final": false, "voice": "Ludwig"}"#;
+        cues.fold(1, 1.5, json).unwrap();
+        assert_eq!(
+            cues.closed(1.5, true, &mut casters),
+            [closed("and that is game", 1.5, 1.5, false, Some("Ludwig"))],
+            "a row's own voice names its cue"
+        );
+    }
+
+    #[test]
+    fn the_closed_captions_switch_on_and_off_mid_cue() {
+        let mut cues = Cues::new("#cap", "#caster{n}", 1, CueParams::default());
+        cues.fold(0, 1.0, &row("and that", 1.0, false)).unwrap();
+        assert!(
+            cues.closed(1.0, false, &mut casters).is_empty(),
+            "nothing goes out while they are off"
+        );
+        assert_eq!(
+            cues.closed(2.0, true, &mut casters),
+            [closed("and that", 2.0, 2.0, false, Some("Mango"))],
+            "switched on mid-cue, the cue starts there"
+        );
+        cues.fold(0, 2.5, &row("and that is", 1.0, false)).unwrap();
+        assert_eq!(
+            cues.closed(2.5, true, &mut casters),
+            [closed("and that is", 2.0, 2.5, false, Some("Mango"))]
+        );
+        assert_eq!(
+            cues.closed(3.0, false, &mut casters),
+            [closed("and that is", 2.0, 3.0, true, Some("Mango"))],
+            "switched off mid-cue, the cue ends there"
+        );
+        cues.fold(0, 3.5, &row("and that is game", 1.0, false))
+            .unwrap();
+        assert!(cues.closed(3.5, false, &mut casters).is_empty());
+        assert_eq!(
+            cues.closed(4.0, true, &mut casters),
+            [closed("and that is game", 4.0, 4.0, false, Some("Mango"))],
+            "on again, the cue still on the display starts afresh"
+        );
+        cues.fold(0, 4.5, &row("and that is game five", 1.0, true))
+            .unwrap();
+        assert_eq!(
+            cues.closed(4.5, true, &mut casters),
+            [closed(
+                "and that is game five",
+                4.0,
+                7.5,
+                true,
+                Some("Mango")
+            )]
+        );
+        assert!(
+            cues.closed(5.0, false, &mut casters).is_empty(),
+            "a cue whose final row went out keeps its end"
+        );
+        assert!(cues.closed(5.5, true, &mut casters).is_empty());
+    }
+
+    #[test]
+    fn a_name_changed_while_live_goes_out_on_the_next_tick() {
+        let mut cues = Cues::new("#captions", "#caster{n}", 2, CueParams::default());
+        let named = |name: &'static str| {
+            move |select: &str| (select == "#caster1").then(|| name.to_string())
+        };
+        cues.closed(0.0, true, &mut named("Mango"));
+        cues.fold(0, 1.0, &row("he goes", 0.0, false)).unwrap();
+        assert_eq!(
+            cues.closed(1.0, true, &mut named("Mango")),
+            [closed("he goes", 1.0, 1.0, false, Some("Mango"))]
+        );
+        assert_eq!(
+            cues.closed(2.0, true, &mut named("MangoPlays")),
+            [closed("he goes", 1.0, 2.0, false, Some("MangoPlays"))],
+            "the cue goes out again under its new name"
+        );
+        cues.fold(0, 2.5, &row("he goes for it", 0.0, true))
+            .unwrap();
+        assert_eq!(
+            cues.closed(2.5, true, &mut named("MangoPlays")),
+            [closed("he goes for it", 1.0, 5.5, true, Some("MangoPlays"))]
+        );
+    }
+
+    #[test]
+    fn a_closed_cue_whose_rows_stop_ends_where_it_leaves_the_display() {
+        let mut cues = Cues::new("#cap", "", 1, CueParams::default());
+        cues.closed(0.0, true, &mut none);
+        cues.fold(0, 1.0, &row("and that", 1.0, false)).unwrap();
+        assert_eq!(
+            cues.closed(1.0, true, &mut none),
+            [closed("and that", 1.0, 1.0, false, None)]
+        );
+        assert!(cues.closed(6.9, true, &mut none).is_empty());
+        assert_eq!(
+            cues.closed(7.5, true, &mut none),
+            [closed("and that", 1.0, 7.0, true, None)],
+            "`stale` after its last row"
+        );
+        cues.fold(0, 8.0, &row("next", 8.0, false)).unwrap();
+        cues.closed(8.0, true, &mut none);
+        cues.fold(0, 20.0, &row("after", 20.0, false)).unwrap();
+        assert_eq!(
+            cues.closed(20.0, true, &mut none),
+            [
+                closed("next", 8.0, 14.0, true, None),
+                closed("after", 20.0, 20.0, false, None),
+            ],
+            "a cue a later row took off the display ends where it left"
+        );
+    }
+
+    #[test]
+    fn a_closed_row_is_a_cue_row_as_a_transcriber_writes_one() {
+        let row: Value =
+            serde_json::from_str(&closed("he goes", 1.0, 1.5, false, Some("Mango \"M\"")).json())
+                .unwrap();
+        assert_eq!(
+            row,
+            serde_json::json!({"text": "he goes", "start_t": 1.0, "end_t": 1.5,
+                               "final": false, "voice": "Mango \"M\""})
+        );
+        let row: Value = serde_json::from_str(&closed("x", 1.0, 2.0, true, None).json()).unwrap();
+        assert!(row.get("voice").is_none(), "no voice when none is known");
     }
 }
